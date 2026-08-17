@@ -1,17 +1,17 @@
 /**
- * HorizonLock PWA  v2.3
+ * HorizonLock PWA  v2.4
  *
  * - Pitch-stable roll: tilting the phone up/down no longer glitches the lock
  * - Continuous roll (no 180° wrap spin): unwrapped angle so rotation past ±180°
  *   continues the short way instead of spinning the long way around
- * - Complementary filter (gyro + gravity) for tighter sync with the video
+ * - Complementary filter (gyro + gravity), no fixed look-ahead
  * - Only corrects roll (horizon), not pitch
  * - Simple real-time path (latest frame @ constant 30 fps)
  * - Manual rotate 0/90/180/270
  */
 
 (() => {
-  const VERSION = "v2.3";
+  const VERSION = "v2.4";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
@@ -33,13 +33,9 @@
   let zoom = 1.7;
   let currentRoll = 0;          // continuous (unwrapped) roll in radians
   let gyroRoll = 0;             // rad/s around the roll axis
-  // Complementary filter: gyro drives short-term motion, gravity slowly
-  // corrects absolute angle. Higher ALPHA_G = more responsive to gravity
-  // (less lag, slightly more noise). Lower = smoother but more trail.
-  const ALPHA_G = 0.12;
-  // Predict ahead of the display pipeline (sensor → JS → canvas → screen).
-  // Tuned for typical iOS Safari camera + motion latency.
-  const PREDICT_SEC = 0.055;
+  // Complementary filter: gyro drives short-term motion, gravity corrects
+  // absolute angle. Higher ALPHA_G = less lag on stops / direction changes.
+  const ALPHA_G = 0.28;
   // When the phone is pitched far up/down, gravity leaves the screen plane
   // and atan2 becomes noisy. Below this horizontal magnitude we HOLD roll
   // (gyro still integrates).
@@ -105,10 +101,12 @@
     }
   }
 
+  // Extrapolate only from the last motion sample to *now* (no fixed
+  // look-ahead). Caps the gap so a stalled event doesn't overshoot.
   function predictedRoll() {
-    // Extra look-ahead so the lock leads the video slightly and feels
-    // locked instead of trailing.
-    return currentRoll + gyroRoll * PREDICT_SEC;
+    if (!lastMotionTime) return currentRoll;
+    const age = Math.min((performance.now() - lastMotionTime) / 1000, 0.04);
+    return currentRoll + gyroRoll * age;
   }
 
   async function requestMotionPermission() {
