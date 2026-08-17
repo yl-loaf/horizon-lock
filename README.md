@@ -2,6 +2,7 @@
 
 Real-time **IMU horizon-lock** camera stabilisation that works in the browser.  
 No Xcode required. Runs on iPhone Safari (and Chrome/Android).
+https://yl-loaf.github.io/horizon-lock/
 
 The image stays level even when you spin the phone. A fixed digital zoom (overscan) prevents the FOV from constantly expanding and contracting.
 
