@@ -1,5 +1,5 @@
 /**
- * HorizonLock PWA  v2.5
+ * HorizonLock PWA  v2.51
  *
  * - Pitch-stable roll: tilting the phone up/down no longer glitches the lock
  * - Continuous roll (no 180° wrap spin): unwrapped angle so rotation past ±180°
@@ -12,7 +12,7 @@
  */
 
 (() => {
-  const VERSION = "v2.5";
+  const VERSION = "v2.51";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
