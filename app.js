@@ -39,7 +39,7 @@
   const ALPHA_G = 0.12;
   // Predict ahead of the display pipeline (sensor → JS → canvas → screen).
   // Tuned for typical iOS Safari camera + motion latency.
-  const PREDICT_SEC = 0.055;
+  const PREDICT_SEC = 0.255;
   // When the phone is pitched far up/down, gravity leaves the screen plane
   // and atan2 becomes noisy. Below this horizontal magnitude we HOLD roll
   // (gyro still integrates).
