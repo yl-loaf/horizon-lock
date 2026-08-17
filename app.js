@@ -6,11 +6,11 @@
 
 (() => {
   // ---------- DOM ----------
-  const video        = document.getElementById("camera");
+  const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
   const outputCanvas  = document.getElementById("output");
-  const pCtx         = processCanvas.getContext("2d", { alpha: false });
-  const oCtx         = outputCanvas.getContext("2d", { alpha: false });
+  const pCtx          = processCanvas.getContext("2d", { alpha: false });
+  const oCtx          = outputCanvas.getContext("2d", { alpha: false });
 
   const btnStart     = document.getElementById("btn-start");
   const btnFlip      = document.getElementById("btn-flip");
@@ -26,70 +26,51 @@
   let facingMode = "environment";          // rear camera
   let zoom = 1.7;
   let currentRoll = 0;                     // radians, filtered
-  const SMOOTH = 0.18;                     // low-pass factor
+  const SMOOTH = 0.18;
   let animId = null;
   let mediaRecorder = null;
   let recordedChunks = [];
   let isRecording = false;
 
-  // Output size (portrait 1080p-ish). Canvas will be scaled to screen.
+  // Fixed output size (portrait)
   const OUT_W = 1080;
   const OUT_H = 1920;
 
   // ---------- Orientation (IMU) ----------
-  function onDeviceOrientation(e) {
-    // On iOS Safari: beta = front-back tilt, gamma = left-right tilt.
-    // For a phone held in portrait, the "roll" that tilts the horizon
-    // is primarily gamma when upright, but we use a more robust combination.
-    // We want the angle that keeps the gravity vector vertical in the image.
+  // Prefer DeviceMotion (gravity) – more reliable for horizon lock
+  function onDeviceMotion(e) {
+    const a = e.accelerationIncludingGravity;
+    if (!a || a.x == null || a.y == null) return;
 
-    if (e.gamma == null || e.beta == null) return;
+    // Gravity vector → roll angle that keeps the horizon level.
+    // Sign is chosen so that tilting the phone left rotates the image the correct way.
+    // (Negated relative to the earlier version that felt flipped.)
+    const rawRoll = -Math.atan2(a.x, a.y);
 
-    // Convert degrees → radians
-    const gamma = e.gamma * Math.PI / 180;   // -90 … 90
-    const beta  = e.beta  * Math.PI / 180;   // -180 … 180
-
-    // Approximate roll relative to gravity for a portrait-held phone.
-    // This formula works well for normal handheld use and moderate spins.
-    // (For full 360° free rotation a more complete rotation-matrix approach
-    //  using DeviceMotion accelerationIncludingGravity is better – see below.)
-    let rawRoll = Math.atan2(Math.sin(gamma), Math.cos(gamma) * Math.sin(beta));
-
-    // Simple exponential low-pass
     currentRoll = currentRoll * (1 - SMOOTH) + rawRoll * SMOOTH;
   }
 
-  // More robust path using DeviceMotion (accelerationIncludingGravity)
-  function onDeviceMotion(e) {
-    const a = e.accelerationIncludingGravity;
-    if (!a || a.x == null) return;
-
-    // Gravity vector in device coordinates.
-    // When the phone is upright in portrait, gravity ≈ (0, -1, 0) or similar.
-    // Roll angle that levels the horizon:
-    const rawRoll = Math.atan2(a.x, a.y);   // radians
-
+  function onDeviceOrientation(e) {
+    if (e.gamma == null || e.beta == null) return;
+    const gamma = e.gamma * Math.PI / 180;
+    const beta  = e.beta  * Math.PI / 180;
+    // Same sign convention as DeviceMotion path
+    const rawRoll = -Math.atan2(Math.sin(gamma), Math.cos(gamma) * Math.sin(beta));
     currentRoll = currentRoll * (1 - SMOOTH) + rawRoll * SMOOTH;
   }
 
   async function requestMotionPermission() {
-    // iOS 13+ requires explicit permission
     if (typeof DeviceMotionEvent !== "undefined" &&
         typeof DeviceMotionEvent.requestPermission === "function") {
       const state = await DeviceMotionEvent.requestPermission();
-      if (state !== "granted") {
-        throw new Error("Motion permission denied");
-      }
+      if (state !== "granted") throw new Error("Motion permission denied");
     }
     if (typeof DeviceOrientationEvent !== "undefined" &&
         typeof DeviceOrientationEvent.requestPermission === "function") {
       const state = await DeviceOrientationEvent.requestPermission();
-      if (state !== "granted") {
-        throw new Error("Orientation permission denied");
-      }
+      if (state !== "granted") throw new Error("Orientation permission denied");
     }
 
-    // Prefer DeviceMotion (includes gravity) when available
     if (window.DeviceMotionEvent) {
       window.addEventListener("devicemotion", onDeviceMotion, true);
     } else {
@@ -117,26 +98,35 @@
     video.srcObject = stream;
     await video.play();
 
-    // Match process canvas to the actual video resolution
-    processCanvas.width  = video.videoWidth  || 1920;
-    processCanvas.height = video.videoHeight || 1080;
+    // Wait one frame so videoWidth/Height are reliable
+    await new Promise(r => requestAnimationFrame(r));
 
-    // Output canvas stays at fixed size for consistent recording
+    // On iOS the rear camera almost always arrives as landscape (w > h)
+    // even when the phone is held in portrait. We normalise everything
+    // to portrait orientation inside processCanvas.
+    const vw = video.videoWidth  || 1920;
+    const vh = video.videoHeight || 1080;
+
+    if (vw >= vh) {
+      // Landscape buffer → rotate 90° into a portrait process canvas
+      processCanvas.width  = vh;
+      processCanvas.height = vw;
+    } else {
+      processCanvas.width  = vw;
+      processCanvas.height = vh;
+    }
+
     outputCanvas.width  = OUT_W;
     outputCanvas.height = OUT_H;
-
-    // Also size the visible canvas CSS to fill the screen (object-fit: cover)
     resizeOutput();
   }
 
   function resizeOutput() {
-    // The canvas element itself is already OUT_W × OUT_H.
-    // CSS makes it cover the viewport.
     outputCanvas.style.width  = "100%";
     outputCanvas.style.height = "100%";
   }
 
-  // ---------- Frame processing (horizon lock + fixed zoom) ----------
+  // ---------- Frame processing ----------
   function drawFrame() {
     if (video.readyState < 2) {
       animId = requestAnimationFrame(drawFrame);
@@ -147,41 +137,48 @@
     const vh = video.videoHeight;
     const pw = processCanvas.width;
     const ph = processCanvas.height;
+    const isLandscapeBuffer = vw >= vh;
 
-    // 1. Draw the raw camera frame into the processing canvas
+    // 1. Draw camera frame into processCanvas, correctly oriented to portrait
     pCtx.save();
     pCtx.clearRect(0, 0, pw, ph);
 
-    // Mirror front camera
-    if (facingMode === "user") {
+    if (isLandscapeBuffer) {
+      // Rotate 90° clockwise so the image stands upright in portrait
+      // (this also fixes the previous 180° flip)
       pCtx.translate(pw, 0);
-      pCtx.scale(-1, 1);
+      pCtx.rotate(Math.PI / 2);
+      // After rotation the drawing size is vh × vw
+      if (facingMode === "user") {
+        // Front camera needs horizontal mirror after the rotation
+        pCtx.translate(0, vw);
+        pCtx.scale(1, -1);
+      }
+      pCtx.drawImage(video, 0, 0, vw, vh);
+    } else {
+      // Already portrait
+      if (facingMode === "user") {
+        pCtx.translate(pw, 0);
+        pCtx.scale(-1, 1);
+      }
+      pCtx.drawImage(video, 0, 0, pw, ph);
     }
-    pCtx.drawImage(video, 0, 0, pw, ph);
     pCtx.restore();
 
-    // 2. Now draw from processCanvas → outputCanvas with rotation + fixed zoom + centre crop
+    // 2. Horizon-lock rotation + fixed digital zoom + centre crop → outputCanvas
     oCtx.save();
     oCtx.clearRect(0, 0, OUT_W, OUT_H);
-
-    // Move origin to centre of output
     oCtx.translate(OUT_W / 2, OUT_H / 2);
 
-    // Apply horizon-lock rotation (negative so the world stays level)
-    oCtx.rotate(-currentRoll);
+    // Apply the (already correctly signed) roll
+    oCtx.rotate(currentRoll);
 
-    // Fixed digital zoom (this is the overscan that prevents FOV pumping)
     const scale = zoom;
-
-    // Source aspect vs destination aspect
-    // We scale so that the *cropped* region still covers the output after rotation.
-    // Simple approach: scale the source so its shorter side * zoom covers the longer output side.
     const srcAspect = pw / ph;
     const dstAspect = OUT_W / OUT_H;
 
     let drawW, drawH;
     if (srcAspect > dstAspect) {
-      // source is wider → fit height then zoom
       drawH = OUT_H * scale;
       drawW = drawH * srcAspect;
     } else {
@@ -189,44 +186,48 @@
       drawH = drawW / srcAspect;
     }
 
-    oCtx.drawImage(
-      processCanvas,
-      -drawW / 2,
-      -drawH / 2,
-      drawW,
-      drawH
-    );
-
+    oCtx.drawImage(processCanvas, -drawW / 2, -drawH / 2, drawW, drawH);
     oCtx.restore();
 
     animId = requestAnimationFrame(drawFrame);
   }
 
-  // ---------- Recording ----------
+  // ---------- Recording (prefer MP4) ----------
+  function getSupportedMimeType() {
+    // Safari on iOS prefers mp4 / H.264
+    const candidates = [
+      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+      "video/mp4;codecs=avc1",
+      "video/mp4",
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm"
+    ];
+    for (const t of candidates) {
+      if (MediaRecorder.isTypeSupported(t)) return t;
+    }
+    return "";
+  }
+
   function startRecording() {
     if (isRecording) return;
 
     recordedChunks = [];
     const canvasStream = outputCanvas.captureStream(30);
 
-    // Add the original audio track if present
+    // Keep original audio
     const audioTracks = stream.getAudioTracks();
     if (audioTracks.length) {
       canvasStream.addTrack(audioTracks[0]);
     }
 
-    const options = { mimeType: "video/webm;codecs=vp9,opus" };
-    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-      options.mimeType = "video/webm;codecs=vp8,opus";
-    }
-    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-      options.mimeType = "video/mp4"; // Safari fallback
-    }
+    const mimeType = getSupportedMimeType();
+    const options = mimeType ? { mimeType } : {};
 
     try {
       mediaRecorder = new MediaRecorder(canvasStream, options);
     } catch (err) {
-      alert("Recording not supported on this browser: " + err.message);
+      alert("Recording not supported on this browser:\n" + err.message);
       return;
     }
 
@@ -235,16 +236,18 @@
     };
 
     mediaRecorder.onstop = () => {
-      const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `HorizonLock_${Date.now()}.webm`;
+      const type = mediaRecorder.mimeType || "video/mp4";
+      const ext  = type.includes("mp4") ? "mp4" : "webm";
+      const blob = new Blob(recordedChunks, { type });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href     = url;
+      a.download = `HorizonLock_${Date.now()}.${ext}`;
       a.click();
       URL.revokeObjectURL(url);
     };
 
-    mediaRecorder.start(100); // timeslice for smoother data
+    mediaRecorder.start(200);
     isRecording = true;
     btnRecord.classList.add("recording");
     recIndicator.classList.add("recording");
@@ -258,7 +261,7 @@
     recIndicator.classList.remove("recording");
   }
 
-  // ---------- UI handlers ----------
+  // ---------- UI ----------
   btnStart.addEventListener("click", async () => {
     btnStart.disabled = true;
     btnStart.textContent = "Requesting permissions…";
@@ -300,8 +303,9 @@
   window.addEventListener("resize", resizeOutput);
   window.addEventListener("orientationchange", () => setTimeout(resizeOutput, 200));
 
-  // Service worker (PWA installability)
+  // Service worker
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("./sw.js").catch(console.warn);
+    const swUrl = new URL("sw.js", window.location.href).href;
+    navigator.serviceWorker.register(swUrl).catch(console.warn);
   }
 })();
