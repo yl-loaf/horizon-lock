@@ -45,7 +45,7 @@
   // Video is typically behind DeviceMotion on iOS Safari; delaying roll
   // matches the orientation to the pixels being drawn. Tune if needed
   // (try 40–120 ms). Positive = use older roll (IMU delayed).
-  const IMU_DELAY_MS = 200;
+  const IMU_DELAY_MS = 40;
   // Ring buffer of recent (t, roll) samples for delayed lookup.
   const ROLL_BUF_SIZE = 64;
   const rollBufT = new Float64Array(ROLL_BUF_SIZE);
