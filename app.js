@@ -1,15 +1,13 @@
 /**
- * HorizonLock PWA  v1.7
+ * HorizonLock PWA  v1.8
  *
- * Key fix from v1.6 debug:
- * - Browser already delivers 1080×1920 portrait on this iPhone
- * - Do NOT apply ±90° when buffer is already portrait
- * - Only rotate when sensor is landscape
- * - Roll axes adjusted so upright phone ≈ 0°
+ * - Manual rotate button: cycles input 0° → 90° → 180° → 270°
+ * - Auto portrait/landscape handling
+ * - Horizon lock + fixed digital zoom
  */
 
 (() => {
-  const VERSION = "v1.7";
+  const VERSION = "v1.8";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
@@ -35,6 +33,9 @@
   let recordedChunks = [];
   let isRecording = false;
 
+  // Manual input rotation: 0, 1, 2, 3  →  0°, 90°, 180°, 270° CW
+  let rotStep = 0;
+
   const OUT_W = 1080;
   const OUT_H = 1920;
 
@@ -42,17 +43,9 @@
   function onDeviceMotion(e) {
     const a = e.accelerationIncludingGravity;
     if (!a || a.x == null || a.y == null) return;
-
-    // Portrait phone, screen toward user:
-    // gravity when upright ≈ (0, -1, 0) or (0, +1, 0)
-    // Roll (tilt left/right) is primarily a.x
-    // We want raw ≈ 0 when phone is upright.
     let raw = Math.atan2(a.x, -a.y);
-
-    // Attenuate when phone is nearly flat
     const upright = Math.min(1, Math.abs(a.y) + 0.25);
     raw *= upright;
-
     currentRoll = currentRoll * (1 - SMOOTH) + raw * SMOOTH;
   }
 
@@ -103,9 +96,8 @@
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
-    const isLandscape = vw > vh;
 
-    // 1. Raw camera → processCanvas (mirror front only)
+    // 1. Camera → processCanvas (front mirror only)
     pCtx.save();
     pCtx.clearRect(0, 0, vw, vh);
     if (facingMode === "user") {
@@ -115,22 +107,18 @@
     pCtx.drawImage(video, 0, 0, vw, vh);
     pCtx.restore();
 
-    // 2. processCanvas → output with optional 90° only if landscape + horizon + zoom
+    // 2. Manual rotation + horizon lock + zoom → output
+    const angle = rotStep * (Math.PI / 2); // 0, 90, 180, 270 CW
+    const swapped = (rotStep % 2 === 1);   // 90° or 270° swaps axes
+
     oCtx.save();
     oCtx.clearRect(0, 0, OUT_W, OUT_H);
     oCtx.translate(OUT_W / 2, OUT_H / 2);
-
-    // Only rotate when the sensor is landscape
-    if (isLandscape) {
-      oCtx.rotate(-Math.PI / 2);
-    }
-
-    // Horizon lock
+    oCtx.rotate(angle);
     oCtx.rotate(currentRoll);
 
-    // Cover + fixed digital zoom
-    const srcW = isLandscape ? vh : vw;
-    const srcH = isLandscape ? vw : vh;
+    const srcW = swapped ? vh : vw;
+    const srcH = swapped ? vw : vh;
     const srcAspect = srcW / srcH;
     const dstAspect = OUT_W / OUT_H;
     const scale = zoom;
@@ -147,13 +135,13 @@
     oCtx.drawImage(processCanvas, -drawW / 2, -drawH / 2, drawW, drawH);
     oCtx.restore();
 
-    // Debug overlay
+    // Debug / version
     oCtx.save();
     oCtx.fillStyle = "rgba(255,255,255,0.85)";
     oCtx.font = "26px -apple-system, sans-serif";
-    oCtx.fillText(VERSION, 20, 40);
+    oCtx.fillText(VERSION + "  rot=" + (rotStep * 90) + "°", 20, 40);
     oCtx.font = "20px -apple-system, sans-serif";
-    oCtx.fillText(vw + "×" + vh + (isLandscape ? " landscape" : " portrait"), 20, 70);
+    oCtx.fillText(vw + "×" + vh + (vw > vh ? " landscape" : " portrait"), 20, 70);
     oCtx.fillText("roll " + (currentRoll * 180 / Math.PI).toFixed(1) + "°", 20, 96);
     oCtx.restore();
 
@@ -216,6 +204,18 @@
   }
 
   // ---------- UI ----------
+  // Add rotate button next to flip button in the header
+  const btnRotate = document.createElement("button");
+  btnRotate.id = "btn-rotate";
+  btnRotate.className = "icon-btn";
+  btnRotate.title = "Rotate input";
+  btnRotate.textContent = "↻";
+  btnRotate.style.marginLeft = "8px";
+  // Insert after flip button
+  if (btnFlip && btnFlip.parentNode) {
+    btnFlip.parentNode.insertBefore(btnRotate, btnFlip.nextSibling);
+  }
+
   const versionEl = document.createElement("p");
   versionEl.textContent = VERSION;
   versionEl.style.cssText = "margin-top:12px;font-size:13px;opacity:0.5;";
@@ -241,6 +241,10 @@
   btnFlip.addEventListener("click", async () => {
     facingMode = facingMode === "environment" ? "user" : "environment";
     try { await startCamera(); } catch (e) { console.error(e); }
+  });
+
+  btnRotate.addEventListener("click", () => {
+    rotStep = (rotStep + 1) % 4;
   });
 
   zoomSlider.addEventListener("input", () => {
