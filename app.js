@@ -1,17 +1,18 @@
 /**
- * HorizonLock PWA  v2.4
+ * HorizonLock PWA  v2.5
  *
  * - Pitch-stable roll: tilting the phone up/down no longer glitches the lock
  * - Continuous roll (no 180° wrap spin): unwrapped angle so rotation past ±180°
  *   continues the short way instead of spinning the long way around
- * - Complementary filter (gyro + gravity), no fixed look-ahead
+ * - Complementary filter (gyro + gravity)
+ * - IMU delayed to match camera pipeline latency (sync lock to video)
  * - Only corrects roll (horizon), not pitch
  * - Simple real-time path (latest frame @ constant 30 fps)
  * - Manual rotate 0/90/180/270
  */
 
 (() => {
-  const VERSION = "v2.4";
+  const VERSION = "v2.5";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
@@ -40,6 +41,17 @@
   // and atan2 becomes noisy. Below this horizontal magnitude we HOLD roll
   // (gyro still integrates).
   const MIN_HORIZONTAL_G = 0.4;
+  // Delay applied to IMU so it lines up with the slower camera pipeline.
+  // Video is typically behind DeviceMotion on iOS Safari; delaying roll
+  // matches the orientation to the pixels being drawn. Tune if needed
+  // (try 40–120 ms). Positive = use older roll (IMU delayed).
+  const IMU_DELAY_MS = 80;
+  // Ring buffer of recent (t, roll) samples for delayed lookup.
+  const ROLL_BUF_SIZE = 64;
+  const rollBufT = new Float64Array(ROLL_BUF_SIZE);
+  const rollBufR = new Float64Array(ROLL_BUF_SIZE);
+  let rollBufIdx = 0;
+  let rollBufCount = 0;
   let lastMotionTime = 0;
   let mediaRecorder = null;
   let recordedChunks = [];
@@ -63,6 +75,53 @@
     let d = to - from;
     d = ((d + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
     return d;
+  }
+
+  function pushRollSample(t, roll) {
+    rollBufT[rollBufIdx] = t;
+    rollBufR[rollBufIdx] = roll;
+    rollBufIdx = (rollBufIdx + 1) % ROLL_BUF_SIZE;
+    if (rollBufCount < ROLL_BUF_SIZE) rollBufCount++;
+  }
+
+  // Roll at time targetT (linear interp between surrounding samples).
+  // Falls back to latest if buffer is empty or target is too new/old.
+  function rollAt(targetT) {
+    if (rollBufCount === 0) return currentRoll;
+
+    // Samples are in chronological order in a ring: oldest → newest.
+    // Walk from newest backward to find the bracketing pair.
+    let newerI = -1;
+    let olderI = -1;
+    for (let k = 0; k < rollBufCount; k++) {
+      const i = (rollBufIdx - 1 - k + ROLL_BUF_SIZE) % ROLL_BUF_SIZE;
+      if (rollBufT[i] >= targetT) {
+        newerI = i;
+      } else {
+        olderI = i;
+        break;
+      }
+    }
+
+    if (newerI < 0) {
+      // target is newer than everything — use latest
+      const i = (rollBufIdx - 1 + ROLL_BUF_SIZE) % ROLL_BUF_SIZE;
+      return rollBufR[i];
+    }
+    if (olderI < 0) {
+      // target is older than everything — use oldest available
+      return rollBufR[newerI];
+    }
+
+    const t0 = rollBufT[olderI];
+    const t1 = rollBufT[newerI];
+    const r0 = rollBufR[olderI];
+    const r1 = rollBufR[newerI];
+    if (t1 <= t0) return r1;
+    const u = (targetT - t0) / (t1 - t0);
+    // Interpolate along shortest arc so we don't cross the ±π seam badly
+    // (samples are already continuous/unwrapped, so plain lerp is fine).
+    return r0 + (r1 - r0) * u;
   }
 
   // ---------- IMU: pitch-stable horizon (roll only) ----------
@@ -99,14 +158,14 @@
         currentRoll += delta * ALPHA_G;
       }
     }
+
+    pushRollSample(now, currentRoll);
   }
 
-  // Extrapolate only from the last motion sample to *now* (no fixed
-  // look-ahead). Caps the gap so a stalled event doesn't overshoot.
-  function predictedRoll() {
-    if (!lastMotionTime) return currentRoll;
-    const age = Math.min((performance.now() - lastMotionTime) / 1000, 0.04);
-    return currentRoll + gyroRoll * age;
+  // Use the roll from (now − IMU_DELAY_MS) so orientation matches the
+  // video frame, which is delayed by the camera pipeline.
+  function delayedRoll() {
+    return rollAt(performance.now() - IMU_DELAY_MS);
   }
 
   async function requestMotionPermission() {
@@ -199,7 +258,7 @@
 
     const angle = rotStep * (Math.PI / 2);
     const swapped = (rotStep % 2 === 1);
-    const roll = predictedRoll();
+    const roll = delayedRoll();
 
     oCtx.save();
     oCtx.clearRect(0, 0, OUT_W, OUT_H);
