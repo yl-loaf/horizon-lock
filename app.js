@@ -1,16 +1,17 @@
 /**
- * HorizonLock PWA  v2.2
+ * HorizonLock PWA  v2.3
  *
  * - Pitch-stable roll: tilting the phone up/down no longer glitches the lock
  * - Continuous roll (no 180° wrap spin): unwrapped angle so rotation past ±180°
  *   continues the short way instead of spinning the long way around
+ * - Complementary filter (gyro + gravity) for tighter sync with the video
  * - Only corrects roll (horizon), not pitch
  * - Simple real-time path (latest frame @ constant 30 fps)
  * - Manual rotate 0/90/180/270
  */
 
 (() => {
-  const VERSION = "v2.2";
+  const VERSION = "v2.3";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
@@ -32,11 +33,18 @@
   let zoom = 1.7;
   let currentRoll = 0;          // continuous (unwrapped) roll in radians
   let gyroRoll = 0;             // rad/s around the roll axis
-  const SMOOTH = 0.2;
-  const PREDICT_SEC = 0.02;
+  // Complementary filter: gyro drives short-term motion, gravity slowly
+  // corrects absolute angle. Higher ALPHA_G = more responsive to gravity
+  // (less lag, slightly more noise). Lower = smoother but more trail.
+  const ALPHA_G = 0.12;
+  // Predict ahead of the display pipeline (sensor → JS → canvas → screen).
+  // Tuned for typical iOS Safari camera + motion latency.
+  const PREDICT_SEC = 0.055;
   // When the phone is pitched far up/down, gravity leaves the screen plane
-  // and atan2 becomes noisy. Below this horizontal magnitude we HOLD roll.
+  // and atan2 becomes noisy. Below this horizontal magnitude we HOLD roll
+  // (gyro still integrates).
   const MIN_HORIZONTAL_G = 0.4;
+  let lastMotionTime = 0;
   let mediaRecorder = null;
   let recordedChunks = [];
   let isRecording = false;
@@ -63,36 +71,43 @@
 
   // ---------- IMU: pitch-stable horizon (roll only) ----------
   function onDeviceMotion(e) {
+    const now = performance.now();
+    const dt = lastMotionTime ? Math.min((now - lastMotionTime) / 1000, 0.05) : 0;
+    lastMotionTime = now;
+
     const a = e.accelerationIncludingGravity;
     const r = e.rotationRate;
 
-    if (a && a.x != null && a.y != null && a.z != null) {
-      // Gravity components in the phone's screen plane (x = right, y = up)
-      const gx = a.x;
-      const gy = a.y;
-      const horizontal = Math.hypot(gx, gy);
-
-      // Only update roll when enough gravity lies in the screen plane.
-      // When you tilt the phone down/up, gravity moves into Z and
-      // horizontal shrinks → we keep the last good roll (no glitch).
-      if (horizontal >= MIN_HORIZONTAL_G) {
-        // atan2 is in (−π, π]. Unwrap so currentRoll can grow past ±π
-        // without a discontinuity; the feed never spins the long way.
-        const raw = Math.atan2(gx, -gy);
-        const delta = shortestDelta(currentRoll, raw);
-        currentRoll = currentRoll * (1 - SMOOTH) + (currentRoll + delta) * SMOOTH;
-      }
-      // else: hold currentRoll
-    }
-
+    // 1) Integrate gyro first (high-frequency, low lag)
     if (r) {
       // Roll rate ≈ gamma on portrait phone (deg/s → rad/s)
       const deg = (r.gamma != null) ? r.gamma : 0;
       gyroRoll = deg * Math.PI / 180;
+      if (dt > 0) {
+        currentRoll += gyroRoll * dt;
+      }
+    }
+
+    // 2) Gravity correction (low-frequency absolute reference)
+    if (a && a.x != null && a.y != null && a.z != null) {
+      const gx = a.x;
+      const gy = a.y;
+      const horizontal = Math.hypot(gx, gy);
+
+      // Only correct when enough gravity lies in the screen plane.
+      // When you tilt the phone down/up, gravity moves into Z → hold
+      // absolute angle; gyro still keeps integrating above.
+      if (horizontal >= MIN_HORIZONTAL_G) {
+        const raw = Math.atan2(gx, -gy);
+        const delta = shortestDelta(currentRoll, raw);
+        currentRoll += delta * ALPHA_G;
+      }
     }
   }
 
   function predictedRoll() {
+    // Extra look-ahead so the lock leads the video slightly and feels
+    // locked instead of trailing.
     return currentRoll + gyroRoll * PREDICT_SEC;
   }
 
