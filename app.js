@@ -12,7 +12,7 @@
  */
 
 (() => {
-  const VERSION = "v2.52";
+  const VERSION = "v2.53";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
