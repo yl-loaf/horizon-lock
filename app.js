@@ -1,12 +1,24 @@
 /**
- * HorizonLock PWA  v1.5
+ * HorizonLock PWA  v1.6
  *
- * v1.5: fix upside-down image (floor was on top).
- * Extra 180° so the scene is the right way up.
+ * Complete rethink of orientation:
+ * - One clear pipeline for landscape sensor → portrait output
+ * - No more random sign flips
+ * - Debug info on screen so we can see what the browser actually delivers
+ * - Horizon lock applied only after the image is upright
  */
 
 (() => {
-  const VERSION = "v1.5";
+  const VERSION = "v1.6";
+
+  // ============================================================
+  // ORIENTATION MODE – change this ONE number if still wrong
+  // 0 = no extra rotation (raw)
+  // 1 = 90° CW
+  // 2 = 90° CCW   ← most common correct for iPhone rear camera
+  // 3 = 180°
+  // ============================================================
+  const ORIENT_MODE = 2;
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
@@ -27,30 +39,29 @@
   let facingMode = "environment";
   let zoom = 1.7;
   let currentRoll = 0;
-  const SMOOTH = 0.14;
+  const SMOOTH = 0.12;
   let mediaRecorder = null;
   let recordedChunks = [];
   let isRecording = false;
-  let bufferIsLandscape = true;
 
   const OUT_W = 1080;
   const OUT_H = 1920;
 
-  // ---------- IMU ----------
+  // ---------- IMU (horizon) ----------
+  // Applied AFTER the image is oriented upright, so axes match the picture.
   function onDeviceMotion(e) {
     const a = e.accelerationIncludingGravity;
     if (!a || a.x == null || a.y == null) return;
-    // Keep same sign as v1.4 for now; we can flip later if lock still feels inverted
-    const rawRoll = -Math.atan2(a.x, a.y);
-    currentRoll = currentRoll * (1 - SMOOTH) + rawRoll * SMOOTH;
-  }
 
-  function onDeviceOrientation(e) {
-    if (e.gamma == null || e.beta == null) return;
-    const gamma = e.gamma * Math.PI / 180;
-    const beta  = e.beta  * Math.PI / 180;
-    const rawRoll = -Math.atan2(Math.sin(gamma), Math.cos(gamma) * Math.sin(beta));
-    currentRoll = currentRoll * (1 - SMOOTH) + rawRoll * SMOOTH;
+    // Phone portrait, screen facing user:
+    // +x = right, +y = up.  Roll that levels the horizon:
+    let raw = Math.atan2(-a.x, a.y);
+
+    // Soften when nearly flat (avoids wild swings)
+    const upright = Math.min(1, Math.abs(a.y) + 0.2);
+    raw *= upright;
+
+    currentRoll = currentRoll * (1 - SMOOTH) + raw * SMOOTH;
   }
 
   async function requestMotionPermission() {
@@ -59,16 +70,7 @@
       const state = await DeviceMotionEvent.requestPermission();
       if (state !== "granted") throw new Error("Motion permission denied");
     }
-    if (typeof DeviceOrientationEvent !== "undefined" &&
-        typeof DeviceOrientationEvent.requestPermission === "function") {
-      const state = await DeviceOrientationEvent.requestPermission();
-      if (state !== "granted") throw new Error("Orientation permission denied");
-    }
-    if (window.DeviceMotionEvent) {
-      window.addEventListener("devicemotion", onDeviceMotion, true);
-    } else {
-      window.addEventListener("deviceorientation", onDeviceOrientation, true);
-    }
+    window.addEventListener("devicemotion", onDeviceMotion, true);
   }
 
   // ---------- Camera ----------
@@ -88,19 +90,11 @@
     await video.play();
     await new Promise(r => requestAnimationFrame(r));
 
-    const vw = video.videoWidth  || 1920;
-    const vh = video.videoHeight || 1080;
-    bufferIsLandscape = vw >= vh;
-
-    if (bufferIsLandscape) {
-      processCanvas.width  = vh;
-      processCanvas.height = vw;
-    } else {
-      processCanvas.width  = vw;
-      processCanvas.height = vh;
-    }
-    outputCanvas.width  = OUT_W;
-    outputCanvas.height = OUT_H;
+    // processCanvas always matches the RAW video size
+    processCanvas.width  = video.videoWidth  || 1920;
+    processCanvas.height = video.videoHeight || 1080;
+    outputCanvas.width   = OUT_W;
+    outputCanvas.height  = OUT_H;
     resizeOutput();
   }
 
@@ -109,7 +103,7 @@
     outputCanvas.style.height = "100%";
   }
 
-  // ---------- Frame processing ----------
+  // ---------- Draw one frame ----------
   function drawFrame() {
     if (video.readyState < 2) {
       requestAnimationFrame(drawFrame);
@@ -118,55 +112,61 @@
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
-    const pw = processCanvas.width;
-    const ph = processCanvas.height;
 
+    // 1. Copy camera into processCanvas (mirror only for front)
     pCtx.save();
-    pCtx.clearRect(0, 0, pw, ph);
-
-    if (bufferIsLandscape) {
-      // v1.5: 90° CW + BOTH axes flipped (= extra 180°) so floor is at the bottom
-      pCtx.translate(pw / 2, ph / 2);
-      pCtx.rotate(Math.PI / 2);
-      pCtx.scale(-1, -1);   // was (1, -1) → now both flipped to fix upside-down
-
-      if (facingMode === "user") {
-        pCtx.scale(-1, 1);
-      }
-      pCtx.drawImage(video, -vh / 2, -vw / 2, vh, vw);
-    } else {
-      if (facingMode === "user") {
-        pCtx.translate(pw, 0);
-        pCtx.scale(-1, 1);
-      }
-      pCtx.drawImage(video, 0, 0, pw, ph);
+    pCtx.clearRect(0, 0, vw, vh);
+    if (facingMode === "user") {
+      pCtx.translate(vw, 0);
+      pCtx.scale(-1, 1);
     }
+    pCtx.drawImage(video, 0, 0, vw, vh);
     pCtx.restore();
 
-    // Horizon lock + zoom
+    // 2. Draw processCanvas → outputCanvas with orientation + horizon + zoom
     oCtx.save();
     oCtx.clearRect(0, 0, OUT_W, OUT_H);
     oCtx.translate(OUT_W / 2, OUT_H / 2);
+
+    // Fixed orientation (makes landscape sensor upright in portrait frame)
+    let rot = 0;
+    if (ORIENT_MODE === 1) rot =  Math.PI / 2;
+    if (ORIENT_MODE === 2) rot = -Math.PI / 2;
+    if (ORIENT_MODE === 3) rot =  Math.PI;
+    oCtx.rotate(rot);
+
+    // Horizon lock (on top of the fixed orientation)
     oCtx.rotate(currentRoll);
 
+    // Cover + digital zoom
+    // After ±90° the source axes are swapped for sizing
+    const swapped = (ORIENT_MODE === 1 || ORIENT_MODE === 2);
+    const srcW = swapped ? vh : vw;
+    const srcH = swapped ? vw : vh;
     const scale = zoom;
-    const srcAspect = pw / ph;
+    const srcAspect = srcW / srcH;
+    const dstAspect = OUT_W / OUT_H;
+
     let drawW, drawH;
-    if (srcAspect > OUT_W / OUT_H) {
+    if (srcAspect > dstAspect) {
       drawH = OUT_H * scale;
       drawW = drawH * srcAspect;
     } else {
       drawW = OUT_W * scale;
       drawH = drawW / srcAspect;
     }
+
     oCtx.drawImage(processCanvas, -drawW / 2, -drawH / 2, drawW, drawH);
     oCtx.restore();
 
-    // Version stamp
+    // Version + debug
     oCtx.save();
-    oCtx.fillStyle = "rgba(255,255,255,0.8)";
-    oCtx.font = "28px -apple-system, BlinkMacSystemFont, sans-serif";
-    oCtx.fillText(VERSION, 24, 48);
+    oCtx.fillStyle = "rgba(255,255,255,0.85)";
+    oCtx.font = "26px -apple-system, sans-serif";
+    oCtx.fillText(VERSION + "  mode=" + ORIENT_MODE, 20, 40);
+    oCtx.font = "20px -apple-system, sans-serif";
+    oCtx.fillText(vw + "×" + vh + (vw >= vh ? " landscape" : " portrait"), 20, 70);
+    oCtx.fillText("roll " + (currentRoll * 180 / Math.PI).toFixed(1) + "°", 20, 96);
     oCtx.restore();
 
     requestAnimationFrame(drawFrame);
@@ -181,9 +181,7 @@
       "video/webm;codecs=vp9,opus",
       "video/webm"
     ];
-    for (const t of candidates) {
-      if (MediaRecorder.isTypeSupported(t)) return t;
-    }
+    for (const t of candidates) if (MediaRecorder.isTypeSupported(t)) return t;
     return "";
   }
 
@@ -202,15 +200,13 @@
       return;
     }
 
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) recordedChunks.push(e.data);
-    };
+    mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) recordedChunks.push(e.data); };
     mediaRecorder.onstop = () => {
       const type = mediaRecorder.mimeType || "video/mp4";
       const ext  = type.includes("mp4") ? "mp4" : "webm";
       const blob = new Blob(recordedChunks, { type });
       const url  = URL.createObjectURL(blob);
-      const a    = document.createElement("a");
+      const a = document.createElement("a");
       a.href = url;
       a.download = "HorizonLock_" + Date.now() + "." + ext;
       a.click();
@@ -248,7 +244,7 @@
       drawFrame();
     } catch (err) {
       console.error(err);
-      alert("Permission or camera error:\n" + err.message);
+      alert("Error:\n" + err.message);
       btnStart.disabled = false;
       btnStart.textContent = "Enable Camera & Motion";
     }
@@ -256,7 +252,7 @@
 
   btnFlip.addEventListener("click", async () => {
     facingMode = facingMode === "environment" ? "user" : "environment";
-    try { await startCamera(); } catch (err) { console.error(err); }
+    try { await startCamera(); } catch (e) { console.error(e); }
   });
 
   zoomSlider.addEventListener("input", () => {
@@ -265,8 +261,7 @@
   });
 
   btnRecord.addEventListener("click", () => {
-    if (isRecording) stopRecording();
-    else startRecording();
+    if (isRecording) stopRecording(); else startRecording();
   });
 
   window.addEventListener("resize", resizeOutput);
