@@ -1,24 +1,15 @@
 /**
- * HorizonLock PWA  v1.6
+ * HorizonLock PWA  v1.7
  *
- * Complete rethink of orientation:
- * - One clear pipeline for landscape sensor → portrait output
- * - No more random sign flips
- * - Debug info on screen so we can see what the browser actually delivers
- * - Horizon lock applied only after the image is upright
+ * Key fix from v1.6 debug:
+ * - Browser already delivers 1080×1920 portrait on this iPhone
+ * - Do NOT apply ±90° when buffer is already portrait
+ * - Only rotate when sensor is landscape
+ * - Roll axes adjusted so upright phone ≈ 0°
  */
 
 (() => {
-  const VERSION = "v1.6";
-
-  // ============================================================
-  // ORIENTATION MODE – change this ONE number if still wrong
-  // 0 = no extra rotation (raw)
-  // 1 = 90° CW
-  // 2 = 90° CCW   ← most common correct for iPhone rear camera
-  // 3 = 180°
-  // ============================================================
-  const ORIENT_MODE = 2;
+  const VERSION = "v1.7";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
@@ -47,18 +38,19 @@
   const OUT_W = 1080;
   const OUT_H = 1920;
 
-  // ---------- IMU (horizon) ----------
-  // Applied AFTER the image is oriented upright, so axes match the picture.
+  // ---------- IMU ----------
   function onDeviceMotion(e) {
     const a = e.accelerationIncludingGravity;
     if (!a || a.x == null || a.y == null) return;
 
-    // Phone portrait, screen facing user:
-    // +x = right, +y = up.  Roll that levels the horizon:
-    let raw = Math.atan2(-a.x, a.y);
+    // Portrait phone, screen toward user:
+    // gravity when upright ≈ (0, -1, 0) or (0, +1, 0)
+    // Roll (tilt left/right) is primarily a.x
+    // We want raw ≈ 0 when phone is upright.
+    let raw = Math.atan2(a.x, -a.y);
 
-    // Soften when nearly flat (avoids wild swings)
-    const upright = Math.min(1, Math.abs(a.y) + 0.2);
+    // Attenuate when phone is nearly flat
+    const upright = Math.min(1, Math.abs(a.y) + 0.25);
     raw *= upright;
 
     currentRoll = currentRoll * (1 - SMOOTH) + raw * SMOOTH;
@@ -81,8 +73,8 @@
       audio: true,
       video: {
         facingMode: { ideal: facingMode },
-        width:  { ideal: 1920 },
-        height: { ideal: 1080 },
+        width:  { ideal: 1080 },
+        height: { ideal: 1920 },
         frameRate: { ideal: 30 }
       }
     });
@@ -90,9 +82,8 @@
     await video.play();
     await new Promise(r => requestAnimationFrame(r));
 
-    // processCanvas always matches the RAW video size
-    processCanvas.width  = video.videoWidth  || 1920;
-    processCanvas.height = video.videoHeight || 1080;
+    processCanvas.width  = video.videoWidth  || 1080;
+    processCanvas.height = video.videoHeight || 1920;
     outputCanvas.width   = OUT_W;
     outputCanvas.height  = OUT_H;
     resizeOutput();
@@ -103,7 +94,7 @@
     outputCanvas.style.height = "100%";
   }
 
-  // ---------- Draw one frame ----------
+  // ---------- Frame ----------
   function drawFrame() {
     if (video.readyState < 2) {
       requestAnimationFrame(drawFrame);
@@ -112,8 +103,9 @@
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
+    const isLandscape = vw > vh;
 
-    // 1. Copy camera into processCanvas (mirror only for front)
+    // 1. Raw camera → processCanvas (mirror front only)
     pCtx.save();
     pCtx.clearRect(0, 0, vw, vh);
     if (facingMode === "user") {
@@ -123,29 +115,25 @@
     pCtx.drawImage(video, 0, 0, vw, vh);
     pCtx.restore();
 
-    // 2. Draw processCanvas → outputCanvas with orientation + horizon + zoom
+    // 2. processCanvas → output with optional 90° only if landscape + horizon + zoom
     oCtx.save();
     oCtx.clearRect(0, 0, OUT_W, OUT_H);
     oCtx.translate(OUT_W / 2, OUT_H / 2);
 
-    // Fixed orientation (makes landscape sensor upright in portrait frame)
-    let rot = 0;
-    if (ORIENT_MODE === 1) rot =  Math.PI / 2;
-    if (ORIENT_MODE === 2) rot = -Math.PI / 2;
-    if (ORIENT_MODE === 3) rot =  Math.PI;
-    oCtx.rotate(rot);
+    // Only rotate when the sensor is landscape
+    if (isLandscape) {
+      oCtx.rotate(-Math.PI / 2);
+    }
 
-    // Horizon lock (on top of the fixed orientation)
+    // Horizon lock
     oCtx.rotate(currentRoll);
 
-    // Cover + digital zoom
-    // After ±90° the source axes are swapped for sizing
-    const swapped = (ORIENT_MODE === 1 || ORIENT_MODE === 2);
-    const srcW = swapped ? vh : vw;
-    const srcH = swapped ? vw : vh;
-    const scale = zoom;
+    // Cover + fixed digital zoom
+    const srcW = isLandscape ? vh : vw;
+    const srcH = isLandscape ? vw : vh;
     const srcAspect = srcW / srcH;
     const dstAspect = OUT_W / OUT_H;
+    const scale = zoom;
 
     let drawW, drawH;
     if (srcAspect > dstAspect) {
@@ -159,13 +147,13 @@
     oCtx.drawImage(processCanvas, -drawW / 2, -drawH / 2, drawW, drawH);
     oCtx.restore();
 
-    // Version + debug
+    // Debug overlay
     oCtx.save();
     oCtx.fillStyle = "rgba(255,255,255,0.85)";
     oCtx.font = "26px -apple-system, sans-serif";
-    oCtx.fillText(VERSION + "  mode=" + ORIENT_MODE, 20, 40);
+    oCtx.fillText(VERSION, 20, 40);
     oCtx.font = "20px -apple-system, sans-serif";
-    oCtx.fillText(vw + "×" + vh + (vw >= vh ? " landscape" : " portrait"), 20, 70);
+    oCtx.fillText(vw + "×" + vh + (isLandscape ? " landscape" : " portrait"), 20, 70);
     oCtx.fillText("roll " + (currentRoll * 180 / Math.PI).toFixed(1) + "°", 20, 96);
     oCtx.restore();
 
