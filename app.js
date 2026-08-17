@@ -1,14 +1,16 @@
 /**
- * HorizonLock PWA  v2.1
+ * HorizonLock PWA  v2.2
  *
  * - Pitch-stable roll: tilting the phone up/down no longer glitches the lock
+ * - Continuous roll (no 180° wrap spin): unwrapped angle so rotation past ±180°
+ *   continues the short way instead of spinning the long way around
  * - Only corrects roll (horizon), not pitch
- * - Simple real-time path (latest frame @ 30 fps)
+ * - Simple real-time path (latest frame @ constant 30 fps)
  * - Manual rotate 0/90/180/270
  */
 
 (() => {
-  const VERSION = "v2.1";
+  const VERSION = "v2.2";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
@@ -28,7 +30,7 @@
   let stream = null;
   let facingMode = "environment";
   let zoom = 1.7;
-  let currentRoll = 0;
+  let currentRoll = 0;          // continuous (unwrapped) roll in radians
   let gyroRoll = 0;             // rad/s around the roll axis
   const SMOOTH = 0.2;
   const PREDICT_SEC = 0.02;
@@ -51,6 +53,14 @@
   const OUT_W = 1080;
   const OUT_H = 1920;
 
+  // Shortest angular difference from `from` to `to` (both radians).
+  // Result is in (−π, π].
+  function shortestDelta(from, to) {
+    let d = to - from;
+    d = ((d + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+    return d;
+  }
+
   // ---------- IMU: pitch-stable horizon (roll only) ----------
   function onDeviceMotion(e) {
     const a = e.accelerationIncludingGravity;
@@ -66,9 +76,11 @@
       // When you tilt the phone down/up, gravity moves into Z and
       // horizontal shrinks → we keep the last good roll (no glitch).
       if (horizontal >= MIN_HORIZONTAL_G) {
-        // Angle of gravity in the screen plane = how much the horizon is tilted
+        // atan2 is in (−π, π]. Unwrap so currentRoll can grow past ±π
+        // without a discontinuity; the feed never spins the long way.
         const raw = Math.atan2(gx, -gy);
-        currentRoll = currentRoll * (1 - SMOOTH) + raw * SMOOTH;
+        const delta = shortestDelta(currentRoll, raw);
+        currentRoll = currentRoll * (1 - SMOOTH) + (currentRoll + delta) * SMOOTH;
       }
       // else: hold currentRoll
     }
