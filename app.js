@@ -1,15 +1,14 @@
 /**
- * HorizonLock PWA  v2.0
+ * HorizonLock PWA  v2.1
  *
- * Simplified real-time path:
- * - No "best frame" buffer (was causing lag)
- * - Always show latest frame, throttled to 30 fps
- * - Lighter gyro prediction
+ * - Pitch-stable roll: tilting the phone up/down no longer glitches the lock
+ * - Only corrects roll (horizon), not pitch
+ * - Simple real-time path (latest frame @ 30 fps)
  * - Manual rotate 0/90/180/270
  */
 
 (() => {
-  const VERSION = "v2.0";
+  const VERSION = "v2.1";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
@@ -30,9 +29,12 @@
   let facingMode = "environment";
   let zoom = 1.7;
   let currentRoll = 0;
-  let gyroZ = 0;
-  const SMOOTH = 0.22;          // slightly more responsive
-  const PREDICT_SEC = 0.02;     // light prediction (~20 ms)
+  let gyroRoll = 0;             // rad/s around the roll axis
+  const SMOOTH = 0.2;
+  const PREDICT_SEC = 0.02;
+  // When the phone is pitched far up/down, gravity leaves the screen plane
+  // and atan2 becomes noisy. Below this horizontal magnitude we HOLD roll.
+  const MIN_HORIZONTAL_G = 0.4;
   let mediaRecorder = null;
   let recordedChunks = [];
   let isRecording = false;
@@ -49,26 +51,37 @@
   const OUT_W = 1080;
   const OUT_H = 1920;
 
-  // ---------- IMU ----------
+  // ---------- IMU: pitch-stable horizon (roll only) ----------
   function onDeviceMotion(e) {
     const a = e.accelerationIncludingGravity;
     const r = e.rotationRate;
 
-    if (a && a.x != null && a.y != null) {
-      let raw = Math.atan2(a.x, -a.y);
-      const upright = Math.min(1, Math.abs(a.y) + 0.25);
-      raw *= upright;
-      currentRoll = currentRoll * (1 - SMOOTH) + raw * SMOOTH;
+    if (a && a.x != null && a.y != null && a.z != null) {
+      // Gravity components in the phone's screen plane (x = right, y = up)
+      const gx = a.x;
+      const gy = a.y;
+      const horizontal = Math.hypot(gx, gy);
+
+      // Only update roll when enough gravity lies in the screen plane.
+      // When you tilt the phone down/up, gravity moves into Z and
+      // horizontal shrinks → we keep the last good roll (no glitch).
+      if (horizontal >= MIN_HORIZONTAL_G) {
+        // Angle of gravity in the screen plane = how much the horizon is tilted
+        const raw = Math.atan2(gx, -gy);
+        currentRoll = currentRoll * (1 - SMOOTH) + raw * SMOOTH;
+      }
+      // else: hold currentRoll
     }
 
     if (r) {
-      const deg = (r.gamma != null) ? r.gamma : (r.alpha != null ? r.alpha : 0);
-      gyroZ = deg * Math.PI / 180;
+      // Roll rate ≈ gamma on portrait phone (deg/s → rad/s)
+      const deg = (r.gamma != null) ? r.gamma : 0;
+      gyroRoll = deg * Math.PI / 180;
     }
   }
 
   function predictedRoll() {
-    return currentRoll + gyroZ * PREDICT_SEC;
+    return currentRoll + gyroRoll * PREDICT_SEC;
   }
 
   async function requestMotionPermission() {
@@ -126,7 +139,7 @@
     outputCanvas.style.height = "100%";
   }
 
-  // ---------- Simple real-time loop ----------
+  // ---------- Real-time loop ----------
   function loop() {
     if (video.readyState < 2) {
       requestAnimationFrame(loop);
@@ -134,8 +147,6 @@
     }
 
     const now = performance.now();
-
-    // Throttle display/record updates to 30 fps – always use the LATEST frame
     if (now - lastOutputTime < OUTPUT_INTERVAL) {
       requestAnimationFrame(loop);
       return;
@@ -152,7 +163,6 @@
     const vw = video.videoWidth;
     const vh = video.videoHeight;
 
-    // Camera → processCanvas
     pCtx.save();
     if (facingMode === "user") {
       pCtx.setTransform(-1, 0, 0, 1, vw, 0);
@@ -162,7 +172,6 @@
     pCtx.drawImage(video, 0, 0, vw, vh);
     pCtx.restore();
 
-    // Horizon + manual rotate + zoom → output
     const angle = rotStep * (Math.PI / 2);
     const swapped = (rotStep % 2 === 1);
     const roll = predictedRoll();
@@ -189,7 +198,6 @@
     oCtx.drawImage(processCanvas, -drawW / 2, -drawH / 2, drawW, drawH);
     oCtx.restore();
 
-    // Overlay
     oCtx.save();
     oCtx.fillStyle = "rgba(255,255,255,0.85)";
     oCtx.font = "24px -apple-system, sans-serif";
