@@ -44,8 +44,8 @@
 
     // Gravity vector → roll angle that keeps the horizon level.
     // Sign is chosen so that tilting the phone left rotates the image the correct way.
-    // (Negated relative to the earlier version that felt flipped.)
-    const rawRoll = -Math.atan2(a.x, a.y);
+    // // (Negated relative to the earlier version that felt flipped.)
+    const rawRoll = Math.atan2(a.x, a.y);
 
     currentRoll = currentRoll * (1 - SMOOTH) + rawRoll * SMOOTH;
   }
