@@ -1,19 +1,22 @@
 /**
- * HorizonLock PWA  v2.6
+ * HorizonLock PWA  v2.7
  *
  * - Pitch-stable roll: tilting the phone up/down no longer glitches the lock
  * - Continuous roll (no 180° wrap spin): unwrapped angle so rotation past ±180°
  *   continues the short way instead of spinning the long way around
- * - Complementary filter (gyro + gravity)
- * - Adaptive IMU delay: auto-detects camera↔IMU lag from frame timing /
- *   load and continuously adjusts so the lock stays locked to the pixels
+ * - Gravity-primary complementary filter:
+ *     • strong gravity blend when slow (locks 1 rev/4s without drift)
+ *     • lighter blend when spinning fast (stays responsive)
+ *     • gyro bias estimation when nearly still
+ *     • gyro sign matched to gravity so they don't fight
+ * - Adaptive IMU delay: auto-detects camera↔IMU lag from frame timing / load
  * - Only corrects roll (horizon), not pitch
  * - Simple real-time path (latest frame @ constant 30 fps)
  * - Manual rotate 0/90/180/270
  */
 
 (() => {
-  const VERSION = "v2.6";
+  const VERSION = "v2.7";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
@@ -34,14 +37,24 @@
   let facingMode = "environment";
   let zoom = 1.7;
   let currentRoll = 0;          // continuous (unwrapped) roll in radians
-  let gyroRoll = 0;             // rad/s around the roll axis
-  // Complementary filter: gyro drives short-term motion, gravity corrects
-  // absolute angle. Higher ALPHA_G = less lag on stops / direction changes.
-  const ALPHA_G = 0.28;
+  let gyroRoll = 0;             // bias-corrected rad/s around the roll axis
+
+  // Gravity is the absolute horizon reference. Gyro fills high-frequency gaps.
+  // ALPHA_G_SLOW is used when |ω| is low (user's 1 rev/4s case) so gravity
+  // owns the lock and drift cannot accumulate. ALPHA_G_FAST is lighter so
+  // aggressive spins stay responsive.
+  const ALPHA_G_SLOW = 0.55;
+  const ALPHA_G_FAST = 0.12;
+  const FAST_RATE_RAD = 2.5;    // ~140 °/s → treat as "fast"
   // When the phone is pitched far up/down, gravity leaves the screen plane
   // and atan2 becomes noisy. Below this horizontal magnitude we HOLD roll
   // (gyro still integrates).
-  const MIN_HORIZONTAL_G = 0.4;
+  const MIN_HORIZONTAL_G = 0.35;
+
+  // Gyro bias estimation: when nearly still, average residual rate → subtract.
+  let gyroBias = 0;             // rad/s
+  const BIAS_ALPHA = 0.04;      // slow EMA of residual when stationary
+  const STILL_RATE_RAD = 0.12;  // ~7 °/s — below this, learn bias
 
   // ---- Adaptive camera↔IMU delay ----
   // Video is typically behind DeviceMotion on mobile browsers. We start at a
@@ -142,6 +155,12 @@
   }
 
   // ---------- IMU: pitch-stable horizon (roll only) ----------
+  //
+  // Absolute horizon = direction of gravity in the screen plane:
+  //   roll = atan2(gx, -gy)   (0 when upright portrait, continuous via unwrap)
+  // Differential = rotationRate about the axis perpendicular to the screen
+  // (MDN: gamma = twist about line perpendicular to screen = optical axis).
+  // Sign of gyro is matched to gravity so they never fight.
   function onDeviceMotion(e) {
     const now = performance.now();
     const dt = lastMotionTime ? Math.min((now - lastMotionTime) / 1000, 0.05) : 0;
@@ -150,30 +169,45 @@
     const a = e.accelerationIncludingGravity;
     const r = e.rotationRate;
 
-    // 1) Integrate gyro first (high-frequency, low lag)
-    if (r) {
-      // Roll rate ≈ gamma on portrait phone (deg/s → rad/s)
-      const deg = (r.gamma != null) ? r.gamma : 0;
-      gyroRoll = deg * Math.PI / 180;
-      if (dt > 0) {
-        currentRoll += gyroRoll * dt;
-      }
+    // 1) Raw gyro about optical axis (deg/s → rad/s), bias-corrected
+    let rawGyro = 0;
+    if (r && r.gamma != null) {
+      rawGyro = r.gamma * Math.PI / 180;
+    }
+    // Sign: positive gamma (clockwise twist looking at screen) must increase
+    // currentRoll the same way atan2(gx,-gy) does when gravity rotates.
+    // Empirical match on iOS Safari: negate so gyro and gravity agree.
+    const gyroSigned = -rawGyro;
+    gyroRoll = gyroSigned - gyroBias;
+
+    if (dt > 0) {
+      currentRoll += gyroRoll * dt;
     }
 
-    // 2) Gravity correction (low-frequency absolute reference)
+    // 2) Gravity absolute reference (primary lock — prevents long-term drift)
+    let gravRoll = null;
+    let horizontal = 0;
     if (a && a.x != null && a.y != null && a.z != null) {
       const gx = a.x;
       const gy = a.y;
-      const horizontal = Math.hypot(gx, gy);
-
-      // Only correct when enough gravity lies in the screen plane.
-      // When you tilt the phone down/up, gravity moves into Z → hold
-      // absolute angle; gyro still keeps integrating above.
+      horizontal = Math.hypot(gx, gy);
       if (horizontal >= MIN_HORIZONTAL_G) {
-        const raw = Math.atan2(gx, -gy);
-        const delta = shortestDelta(currentRoll, raw);
-        currentRoll += delta * ALPHA_G;
+        gravRoll = Math.atan2(gx, -gy);
       }
+    }
+
+    if (gravRoll != null) {
+      const delta = shortestDelta(currentRoll, gravRoll);
+      // Trust gravity more when spinning slowly (exactly the drift case).
+      const rateMag = Math.abs(gyroRoll);
+      const t = Math.min(1, rateMag / FAST_RATE_RAD);
+      const alphaG = ALPHA_G_SLOW + (ALPHA_G_FAST - ALPHA_G_SLOW) * t;
+      currentRoll += delta * alphaG;
+    }
+
+    // Learn gyro bias while nearly still: average residual rate → 0.
+    if (Math.abs(gyroSigned) < STILL_RATE_RAD) {
+      gyroBias = gyroBias * (1 - BIAS_ALPHA) + gyroSigned * BIAS_ALPHA;
     }
 
     pushRollSample(now, currentRoll);
@@ -359,6 +393,10 @@
     oCtx.fillText(
       "roll " + (roll * 180 / Math.PI).toFixed(1) + "°  lag " + imuDelayMs.toFixed(0) + "ms",
       16, 86
+    );
+    oCtx.fillText(
+      "ω " + (gyroRoll * 180 / Math.PI).toFixed(1) + "°/s  bias " + (gyroBias * 180 / Math.PI).toFixed(2),
+      16, 110
     );
     oCtx.restore();
 
