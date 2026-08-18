@@ -1,18 +1,19 @@
 /**
- * HorizonLock PWA  v2.51
+ * HorizonLock PWA  v2.6
  *
  * - Pitch-stable roll: tilting the phone up/down no longer glitches the lock
  * - Continuous roll (no 180° wrap spin): unwrapped angle so rotation past ±180°
  *   continues the short way instead of spinning the long way around
  * - Complementary filter (gyro + gravity)
- * - IMU delayed to match camera pipeline latency (sync lock to video)
+ * - Adaptive IMU delay: auto-detects camera↔IMU lag from frame timing /
+ *   load and continuously adjusts so the lock stays locked to the pixels
  * - Only corrects roll (horizon), not pitch
  * - Simple real-time path (latest frame @ constant 30 fps)
  * - Manual rotate 0/90/180/270
  */
 
 (() => {
-  const VERSION = "v2.53";
+  const VERSION = "v2.6";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
@@ -41,11 +42,16 @@
   // and atan2 becomes noisy. Below this horizontal magnitude we HOLD roll
   // (gyro still integrates).
   const MIN_HORIZONTAL_G = 0.4;
-  // Delay applied to IMU so it lines up with the slower camera pipeline.
-  // Video is typically behind DeviceMotion on iOS Safari; delaying roll
-  // matches the orientation to the pixels being drawn. Tune if needed
-  // (try 40–120 ms). Positive = use older roll (IMU delayed).
-  const IMU_DELAY_MS = 40;
+
+  // ---- Adaptive camera↔IMU delay ----
+  // Video is typically behind DeviceMotion on mobile browsers. We start at a
+  // safe default and continuously estimate lag from frame-time jitter / load.
+  // Lower CPU load (smoother rAF intervals) → lower delay; higher load → more.
+  const IMU_DELAY_MIN_MS = 40;
+  const IMU_DELAY_MAX_MS = 140;
+  const IMU_DELAY_DEFAULT_MS = 80;
+  let imuDelayMs = IMU_DELAY_DEFAULT_MS;
+
   // Ring buffer of recent (t, roll) samples for delayed lookup.
   const ROLL_BUF_SIZE = 64;
   const rollBufT = new Float64Array(ROLL_BUF_SIZE);
@@ -53,6 +59,17 @@
   let rollBufIdx = 0;
   let rollBufCount = 0;
   let lastMotionTime = 0;
+
+  // Frame-interval stats used to estimate processor load / pipeline lag.
+  // We keep a short window of rAF deltas; higher variance or mean → more load.
+  const FRAME_STAT_SIZE = 45;           // ~1.5 s at 30 fps
+  const frameDeltas = new Float64Array(FRAME_STAT_SIZE);
+  let frameStatIdx = 0;
+  let frameStatCount = 0;
+  let lastFrameTime = 0;
+  let lastDelayUpdate = 0;
+  const DELAY_UPDATE_INTERVAL_MS = 400;  // how often we re-estimate lag
+
   let mediaRecorder = null;
   let recordedChunks = [];
   let isRecording = false;
@@ -162,10 +179,58 @@
     pushRollSample(now, currentRoll);
   }
 
-  // Use the roll from (now − IMU_DELAY_MS) so orientation matches the
+  // Use the roll from (now − imuDelayMs) so orientation matches the
   // video frame, which is delayed by the camera pipeline.
   function delayedRoll() {
-    return rollAt(performance.now() - IMU_DELAY_MS);
+    return rollAt(performance.now() - imuDelayMs);
+  }
+
+  // Record one frame interval and, periodically, re-estimate IMU delay from
+  // recent timing. Smooth, low-load frames → shorter delay; jittery / slow
+  // frames (thermal throttle, background work, high zoom work) → longer delay.
+  function noteFrameTime(now) {
+    if (lastFrameTime > 0) {
+      const dt = now - lastFrameTime;
+      // Ignore extreme pauses (tab backgrounded, etc.)
+      if (dt > 5 && dt < 200) {
+        frameDeltas[frameStatIdx] = dt;
+        frameStatIdx = (frameStatIdx + 1) % FRAME_STAT_SIZE;
+        if (frameStatCount < FRAME_STAT_SIZE) frameStatCount++;
+      }
+    }
+    lastFrameTime = now;
+
+    if (frameStatCount < 12) return;
+    if (now - lastDelayUpdate < DELAY_UPDATE_INTERVAL_MS) return;
+    lastDelayUpdate = now;
+
+    let sum = 0;
+    let sumSq = 0;
+    for (let i = 0; i < frameStatCount; i++) {
+      const d = frameDeltas[i];
+      sum += d;
+      sumSq += d * d;
+    }
+    const mean = sum / frameStatCount;
+    const variance = Math.max(0, sumSq / frameStatCount - mean * mean);
+    const std = Math.sqrt(variance);
+
+    // Target interval is OUTPUT_INTERVAL (~33.3 ms). Excess mean + std is a
+    // proxy for pipeline + CPU lag beyond the ideal schedule.
+    const ideal = OUTPUT_INTERVAL;
+    const excess = Math.max(0, mean - ideal) + std * 0.85;
+
+    // Map excess [0 … ~40 ms] → delay [MIN … MAX]. Light load → near MIN.
+    // Soft clamp so a single spike doesn't yank the delay.
+    const t = Math.min(1, excess / 36);
+    const target = IMU_DELAY_MIN_MS + t * (IMU_DELAY_MAX_MS - IMU_DELAY_MIN_MS);
+
+    // EMA toward target so the lock doesn't jump when load changes.
+    const alpha = 0.22;
+    imuDelayMs = imuDelayMs + (target - imuDelayMs) * alpha;
+    // Hard safety bounds
+    if (imuDelayMs < IMU_DELAY_MIN_MS) imuDelayMs = IMU_DELAY_MIN_MS;
+    if (imuDelayMs > IMU_DELAY_MAX_MS) imuDelayMs = IMU_DELAY_MAX_MS;
   }
 
   async function requestMotionPermission() {
@@ -237,6 +302,9 @@
     }
     lastOutputTime = now;
 
+    // Feed adaptive lag estimator with this frame's timing.
+    noteFrameTime(now);
+
     fpsCount++;
     if (now - fpsLast >= 1000) {
       displayFps = fpsCount;
@@ -288,7 +356,10 @@
     oCtx.fillText(VERSION + "  rot=" + (rotStep * 90) + "°", 16, 36);
     oCtx.font = "18px -apple-system, sans-serif";
     oCtx.fillText(vw + "×" + vh + "  " + displayFps + " fps", 16, 62);
-    oCtx.fillText("roll " + (roll * 180 / Math.PI).toFixed(1) + "°", 16, 86);
+    oCtx.fillText(
+      "roll " + (roll * 180 / Math.PI).toFixed(1) + "°  lag " + imuDelayMs.toFixed(0) + "ms",
+      16, 86
+    );
     oCtx.restore();
 
     requestAnimationFrame(loop);
