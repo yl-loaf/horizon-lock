@@ -1,12 +1,12 @@
 /**
- * HorizonLock PWA  v2.7
+ * HorizonLock PWA  v2.8
  *
  * - Pitch-stable roll: tilting the phone up/down no longer glitches the lock
  * - Continuous roll (no 180° wrap spin): unwrapped angle so rotation past ±180°
  *   continues the short way instead of spinning the long way around
  * - Gravity-primary complementary filter:
  *     • strong gravity blend when slow (locks 1 rev/4s without drift)
- *     • lighter blend when spinning fast (stays responsive)
+ *     • smoother mid-rate blend + gyro scale 0.92 (no overshoot at higher ω)
  *     • gyro bias estimation when nearly still
  *     • gyro sign matched to gravity so they don't fight
  * - Adaptive IMU delay: auto-detects camera↔IMU lag from frame timing / load
@@ -16,7 +16,7 @@
  */
 
 (() => {
-  const VERSION = "v2.7";
+  const VERSION = "v2.8";
 
   const video         = document.getElementById("camera");
   const processCanvas = document.getElementById("process");
@@ -40,16 +40,20 @@
   let gyroRoll = 0;             // bias-corrected rad/s around the roll axis
 
   // Gravity is the absolute horizon reference. Gyro fills high-frequency gaps.
-  // ALPHA_G_SLOW is used when |ω| is low (user's 1 rev/4s case) so gravity
-  // owns the lock and drift cannot accumulate. ALPHA_G_FAST is lighter so
-  // aggressive spins stay responsive.
-  const ALPHA_G_SLOW = 0.55;
-  const ALPHA_G_FAST = 0.12;
-  const FAST_RATE_RAD = 2.5;    // ~140 °/s → treat as "fast"
+  // ALPHA_G_SLOW: low |ω| → gravity owns the lock (no long-term drift).
+  // ALPHA_G_FAST: high |ω| → lighter gravity so spins stay responsive.
+  // Mid rates use a smooth blend so the image doesn't overshoot.
+  const ALPHA_G_SLOW = 0.48;
+  const ALPHA_G_FAST = 0.18;
+  const FAST_RATE_RAD = 1.8;    // ~103 °/s → fully "fast" blend
   // When the phone is pitched far up/down, gravity leaves the screen plane
   // and atan2 becomes noisy. Below this horizontal magnitude we HOLD roll
   // (gyro still integrates).
   const MIN_HORIZONTAL_G = 0.35;
+
+  // Gyro scale < 1 compensates slight over-read of rotationRate on some
+  // devices so mid-speed spins don't turn "a bit more than usual".
+  const GYRO_SCALE = 0.92;
 
   // Gyro bias estimation: when nearly still, average residual rate → subtract.
   let gyroBias = 0;             // rad/s
@@ -169,7 +173,7 @@
     const a = e.accelerationIncludingGravity;
     const r = e.rotationRate;
 
-    // 1) Raw gyro about optical axis (deg/s → rad/s), bias-corrected
+    // 1) Raw gyro about optical axis (deg/s → rad/s), bias-corrected + scaled
     let rawGyro = 0;
     if (r && r.gamma != null) {
       rawGyro = r.gamma * Math.PI / 180;
@@ -177,7 +181,7 @@
     // Sign: positive gamma (clockwise twist looking at screen) must increase
     // currentRoll the same way atan2(gx,-gy) does when gravity rotates.
     // Empirical match on iOS Safari: negate so gyro and gravity agree.
-    const gyroSigned = -rawGyro;
+    const gyroSigned = -rawGyro * GYRO_SCALE;
     gyroRoll = gyroSigned - gyroBias;
 
     if (dt > 0) {
@@ -186,11 +190,10 @@
 
     // 2) Gravity absolute reference (primary lock — prevents long-term drift)
     let gravRoll = null;
-    let horizontal = 0;
     if (a && a.x != null && a.y != null && a.z != null) {
       const gx = a.x;
       const gy = a.y;
-      horizontal = Math.hypot(gx, gy);
+      const horizontal = Math.hypot(gx, gy);
       if (horizontal >= MIN_HORIZONTAL_G) {
         gravRoll = Math.atan2(gx, -gy);
       }
@@ -198,9 +201,10 @@
 
     if (gravRoll != null) {
       const delta = shortestDelta(currentRoll, gravRoll);
-      // Trust gravity more when spinning slowly (exactly the drift case).
+      // Smoothstep blend: mid rates ease in so the lock doesn't overshoot.
       const rateMag = Math.abs(gyroRoll);
-      const t = Math.min(1, rateMag / FAST_RATE_RAD);
+      let t = Math.min(1, rateMag / FAST_RATE_RAD);
+      t = t * t * (3 - 2 * t); // smoothstep
       const alphaG = ALPHA_G_SLOW + (ALPHA_G_FAST - ALPHA_G_SLOW) * t;
       currentRoll += delta * alphaG;
     }
