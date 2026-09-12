@@ -4,52 +4,890 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="theme-color" content="#000000" />
-  <meta name="description" content="Real-time IMU horizon-lock camera stabilisation. Works even when the phone is spinning." />
-  <link rel="manifest" href="manifest.json" />
-  <link rel="apple-touch-icon" href="icon-192.png" />
-  <title>HorizonLock</title>
-  <link rel="stylesheet" href="style.css" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Horizon Lock – Best Quality Stabilizer</title>
+  <style>
+    :root {
+      --bg: #0b0f14;
+      --panel: #151b24;
+      --accent: #3b82f6;
+      --accent2: #22c55e;
+      --danger: #ef4444;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --border: #1f2937;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      overflow: hidden;
+      touch-action: none;
+    }
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      max-width: 100vw;
+    }
+    header {
+      padding: 12px 16px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    header h1 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+    header .badge {
+      font-size: 0.7rem;
+      background: #1e3a5f;
+      color: #93c5fd;
+      padding: 3px 8px;
+      border-radius: 999px;
+    }
+    .main {
+      flex: 1;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #000;
+      overflow: hidden;
+    }
+    #previewCanvas, #rawVideo {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+    #rawVideo {
+      display: none;
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 12px;
+    }
+    .status-bar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+    .status-pill {
+      background: rgba(0,0,0,0.55);
+      backdrop-filter: blur(6px);
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .status-pill.good { color: #86efac; }
+    .status-pill.warn { color: #fcd34d; }
+    .status-pill.bad  { color: #fca5a5; }
+    .horizon-line {
+      position: absolute;
+      left: 10%;
+      right: 10%;
+      top: 50%;
+      height: 1px;
+      background: rgba(34, 197, 94, 0.7);
+      box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
+      transform: translateY(-50%);
+      opacity: 0.6;
+    }
+    .controls {
+      background: var(--panel);
+      border-top: 1px solid var(--border);
+      padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    button {
+      appearance: none;
+      border: none;
+      border-radius: 12px;
+      padding: 12px 18px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.12s, opacity 0.12s, background 0.15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    button:active { transform: scale(0.97); }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      transform: none;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: white;
+    }
+    .btn-success {
+      background: var(--accent2);
+      color: #052e16;
+    }
+    .btn-danger {
+      background: var(--danger);
+      color: white;
+    }
+    .btn-ghost {
+      background: #1f2937;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-record {
+      width: 72px;
+      height: 72px;
+      border-radius: 50%;
+      background: #1f2937;
+      border: 4px solid #ef4444;
+      padding: 0;
+      position: relative;
+    }
+    .btn-record::after {
+      content: "";
+      width: 28px;
+      height: 28px;
+      background: #ef4444;
+      border-radius: 50%;
+      transition: all 0.2s;
+    }
+    .btn-record.recording::after {
+      width: 22px;
+      height: 22px;
+      border-radius: 4px;
+    }
+    .settings {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      font-size: 0.85rem;
+    }
+    .settings label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      color: var(--muted);
+    }
+    .settings input[type="range"] {
+      width: 100%;
+      accent-color: var(--accent);
+    }
+    .settings select, .settings input[type="number"] {
+      background: #0f172a;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 0.9rem;
+    }
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.75);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 20px;
+    }
+    .modal.open { display: flex; }
+    .modal-card {
+      background: var(--panel);
+      border-radius: 16px;
+      padding: 24px;
+      max-width: 420px;
+      width: 100%;
+      border: 1px solid var(--border);
+    }
+    .modal-card h2 {
+      font-size: 1.2rem;
+      margin-bottom: 12px;
+    }
+    .modal-card p {
+      color: var(--muted);
+      font-size: 0.9rem;
+      line-height: 1.5;
+      margin-bottom: 16px;
+    }
+    .modal-actions {
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+    }
+    .hidden { display: none !important; }
+    .log {
+      max-height: 120px;
+      overflow-y: auto;
+      font-family: ui-monospace, monospace;
+      font-size: 0.7rem;
+      background: #0f172a;
+      border-radius: 8px;
+      padding: 8px;
+      color: #94a3b8;
+      margin-top: 8px;
+    }
+  </style>
 </head>
 <body>
-  <div id="app">
-    <!-- Live stabilised view -->
-    <canvas id="output"></canvas>
+  <div class="app">
+    <header>
+      <h1>Horizon Lock</h1>
+      <span class="badge" id="modeBadge">Best Quality Mode</span>
+    </header>
 
-    <!-- Hidden source video + processing canvas -->
-    <video id="camera" playsinline muted autoplay style="display:none"></video>
-    <canvas id="process" style="display:none"></canvas>
-
-    <!-- UI Overlay -->
-    <div id="ui">
-      <header>
-        <button id="btn-flip" class="icon-btn" title="Switch camera">⟳</button>
-        <div id="status">
-          <span id="rec-indicator"></span>
-          <span id="zoom-label">1.7×</span>
+    <div class="main">
+      <video id="rawVideo" playsinline muted autoplay></video>
+      <canvas id="previewCanvas"></canvas>
+      <div class="overlay">
+        <div class="status-bar">
+          <span class="status-pill" id="sensorStatus">Sensors: —</span>
+          <span class="status-pill" id="fpsStatus">FPS: —</span>
+          <span class="status-pill" id="rollStatus">Roll: —°</span>
+          <span class="status-pill" id="recStatus">Ready</span>
         </div>
-      </header>
+        <div class="horizon-line" id="horizonGuide"></div>
+      </div>
+    </div>
 
-      <div id="permission-gate" class="gate">
-        <h1>HorizonLock</h1>
-        <p>Real-time horizon lock using your phone’s IMU.<br>Keeps the image level even when spinning.</p>
-        <button id="btn-start" class="primary">Enable Camera &amp; Motion</button>
-        <p class="hint">Requires HTTPS and iOS 13+ / modern Chrome. Add to Home Screen for best experience.</p>
+    <div class="controls">
+      <div class="settings">
+        <label>
+          Crop margin
+          <input type="range" id="cropSlider" min="5" max="35" value="18" />
+          <span id="cropValue">18%</span>
+        </label>
+        <label>
+          Smoothing
+          <input type="range" id="smoothSlider" min="0" max="95" value="55" />
+          <span id="smoothValue">55%</span>
+        </label>
+        <label>
+          Target FPS
+          <select id="fpsSelect">
+            <option value="30">30</option>
+            <option value="60" selected>60</option>
+          </select>
+        </label>
+        <label>
+          Resolution
+          <select id="resSelect">
+            <option value="1280x720">720p</option>
+            <option value="1920x1080" selected>1080p</option>
+          </select>
+        </label>
       </div>
 
-      <footer id="controls" style="display:none">
-        <div class="slider-row">
-          <span>−</span>
-          <input type="range" id="zoom" min="1.3" max="2.4" step="0.05" value="1.7" />
-          <span>+</span>
-        </div>
-        <button id="btn-record" class="record-btn"></button>
-        <p class="hint">Fixed digital zoom prevents FOV pumping while spinning</p>
-      </footer>
+      <div class="row">
+        <button class="btn-ghost" id="btnStart" type="button">Start Camera</button>
+        <button class="btn-record" id="btnRecord" type="button" disabled title="Record"></button>
+        <button class="btn-ghost" id="btnStop" type="button" disabled>Stop</button>
+      </div>
+
+      <div class="row">
+        <button class="btn-primary" id="btnDownload" type="button" disabled>Download Stabilized</button>
+        <button class="btn-ghost" id="btnDownloadRaw" type="button" disabled>Download Raw + IMU</button>
+      </div>
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <!-- Permission / Info Modal -->
+  <div class="modal open" id="startModal">
+    <div class="modal-card">
+      <h2>Best Quality Horizon Lock</h2>
+      <p>
+        This app records the <strong>raw camera stream + high-rate IMU data</strong> for the highest possible stabilization quality, while showing a live horizon-locked preview.
+      </p>
+      <p>
+        After recording you can download the stabilized video or the raw video + IMU log for even better offline processing (e.g. Gyroflow).
+      </p>
+      <div id="secureWarning" style="display:none; background:#451a03; border:1px solid #f59e0b; border-radius:10px; padding:12px; margin-bottom:14px; font-size:0.85rem; color:#fde68a;">
+        <strong>⚠ Insecure origin detected</strong><br>
+        Camera and sensors are blocked when opening the file directly (<code>file://</code>).<br><br>
+        <strong>Fix:</strong> Serve it over HTTP/HTTPS. On the same machine run:<br>
+        <code style="background:#1c1917;padding:4px 6px;border-radius:4px;display:inline-block;margin-top:6px;">python3 -m http.server 8080</code><br>
+        then open <code>http://localhost:8080/horizon-lock.html</code><br><br>
+        On a phone: put the file on any static host (GitHub Pages, Netlify, Vercel, ngrok, etc.) and open the HTTPS URL.
+      </div>
+      <p style="font-size:0.8rem;color:#fbbf24;">
+        Requires a secure context (HTTPS or localhost), camera permission, and motion sensor access.<br>
+        <strong>iPhone:</strong> After allowing motion access, gently tilt the phone – the Roll value should start changing. Best results on modern Android Chrome.
+      </p>
+      <div class="modal-actions">
+        <button class="btn-primary" id="btnGrant">Grant Access & Start</button>
+      </div>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+  <script>
+    // ============================================================
+    // Horizon Lock – Best Quality Mode
+    // Real-time preview + Raw video + IMU recording for post-process
+    // ============================================================
+
+    const $ = (id) => document.getElementById(id);
+
+    const logEl = $("log");
+    function log(msg, type = "info") {
+      const time = new Date().toLocaleTimeString();
+      const line = document.createElement("div");
+      line.textContent = `[${time}] ${msg}`;
+      if (type === "error") line.style.color = "#fca5a5";
+      if (type === "ok") line.style.color = "#86efac";
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(msg);
+    }
+
+    // ---------- State ----------
+    let stream = null;
+    let videoTrack = null;
+    let animationId = null;
+    let isRecording = false;
+    let mediaRecorder = null;
+    let recordedChunks = [];
+    let rawRecorder = null;
+    let rawChunks = [];
+    let imuLog = [];          // { t, alpha, beta, gamma, qx, qy, qz, qw, gx, gy, gz }
+    let startTime = 0;
+    let frameCount = 0;
+    let lastFpsTime = 0;
+    let currentFps = 0;
+
+    // Orientation state (smoothed)
+    let rawRoll = 0;          // degrees
+    let smoothedRoll = 0;
+    let lastSensorTime = 0;
+    let sensorType = "none";
+
+    // Canvas
+    const canvas = $("previewCanvas");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const video = $("rawVideo");
+
+    // ---------- Sensor helpers ----------
+    function eulerToRoll(beta, gamma) {
+      // beta  = front-back tilt (-180 to 180)
+      // gamma = left-right tilt (-90 to 90)
+      // For horizon lock we want the rotation that keeps the horizon level
+      // in the camera image. Using gamma directly works well when the phone
+      // is roughly upright; we blend with beta for extreme angles.
+      if (Math.abs(beta) > 45) {
+        // Device is significantly tilted forward/back – use a more stable mix
+        return gamma * Math.cos(beta * Math.PI / 180);
+      }
+      return gamma;
+    }
+
+    function quaternionToRoll(qx, qy, qz, qw) {
+      // Extract roll from quaternion (device → world)
+      // Simplified: we care about the rotation that tilts the horizon in the camera image.
+      const sinr_cosp = 2 * (qw * qx + qy * qz);
+      const cosr_cosp = 1 - 2 * (qx * qx + qy * qy);
+      return Math.atan2(sinr_cosp, cosr_cosp) * 180 / Math.PI;
+    }
+
+    // Complementary / exponential smoothing
+    function smoothAngle(prev, next, factor) {
+      // Handle wrap-around
+      let diff = next - prev;
+      while (diff > 180) diff -= 360;
+      while (diff < -180) diff += 360;
+      return prev + diff * (1 - factor);
+    }
+
+    // ---------- Sensor setup ----------
+    async function initSensors() {
+      // Prefer Generic Sensor API
+      if ("AbsoluteOrientationSensor" in window) {
+        try {
+          const sensor = new AbsoluteOrientationSensor({ frequency: 60 });
+          sensor.addEventListener("reading", () => {
+            const q = sensor.quaternion; // [x, y, z, w]
+            const roll = quaternionToRoll(q[0], q[1], q[2], q[3]);
+            updateOrientation(roll, {
+              qx: q[0], qy: q[1], qz: q[2], qw: q[3]
+            });
+          });
+          sensor.addEventListener("error", (e) => {
+            log("AbsoluteOrientationSensor error: " + e.error.name, "error");
+            fallbackDeviceOrientation();
+          });
+          sensor.start();
+          sensorType = "AbsoluteOrientationSensor";
+          log("Using AbsoluteOrientationSensor @ 60 Hz", "ok");
+          $("sensorStatus").textContent = "Sensors: AbsoluteOrientation";
+          $("sensorStatus").className = "status-pill good";
+          return;
+        } catch (e) {
+          // Permissions-Policy or missing feature – fall through quietly
+          log("AbsoluteOrientationSensor unavailable (" + e.message.split(":")[0] + ")", "error");
+        }
+      }
+
+      if ("RelativeOrientationSensor" in window) {
+        try {
+          const sensor = new RelativeOrientationSensor({ frequency: 60 });
+          sensor.addEventListener("reading", () => {
+            const q = sensor.quaternion;
+            const roll = quaternionToRoll(q[0], q[1], q[2], q[3]);
+            updateOrientation(roll, {
+              qx: q[0], qy: q[1], qz: q[2], qw: q[3]
+            });
+          });
+          sensor.start();
+          sensorType = "RelativeOrientationSensor";
+          log("Using RelativeOrientationSensor @ 60 Hz", "ok");
+          $("sensorStatus").textContent = "Sensors: RelativeOrientation";
+          $("sensorStatus").className = "status-pill good";
+          return;
+        } catch (e) {
+          log("RelativeOrientationSensor unavailable (" + e.message.split(":")[0] + ")", "error");
+        }
+      }
+
+      // Fallback to classic deviceorientation event
+      await fallbackDeviceOrientation();
+    }
+
+    async function fallbackDeviceOrientation() {
+      // Remove any previous listeners to avoid duplicates
+      window.removeEventListener("deviceorientation", onDeviceOrientation, true);
+      window.removeEventListener("devicemotion", onDeviceMotion, true);
+
+      const needsPermission =
+        typeof DeviceOrientationEvent !== "undefined" &&
+        typeof DeviceOrientationEvent.requestPermission === "function";
+
+      if (needsPermission) {
+        try {
+          // Must be called from a user gesture (the Grant button)
+          const orientState = await DeviceOrientationEvent.requestPermission();
+          log("DeviceOrientation permission: " + orientState);
+
+          let motionState = "not-required";
+          if (typeof DeviceMotionEvent !== "undefined" &&
+              typeof DeviceMotionEvent.requestPermission === "function") {
+            motionState = await DeviceMotionEvent.requestPermission();
+            log("DeviceMotion permission: " + motionState);
+          }
+
+          if (orientState === "granted") {
+            window.addEventListener("deviceorientation", onDeviceOrientation, true);
+            if (motionState === "granted") {
+              window.addEventListener("devicemotion", onDeviceMotion, true);
+            }
+            sensorType = "deviceorientation (iOS)";
+            log("Using deviceorientation + devicemotion (iOS)", "ok");
+            $("sensorStatus").textContent = "Sensors: deviceorientation (iOS)";
+            $("sensorStatus").className = "status-pill good";
+          } else {
+            log("Motion permission denied by user", "error");
+            $("sensorStatus").textContent = "Sensors: Denied";
+            $("sensorStatus").className = "status-pill bad";
+            alert("Motion sensor permission is required for horizon lock.\nPlease allow it when prompted.");
+          }
+        } catch (e) {
+          log("Permission request error: " + e.message, "error");
+          $("sensorStatus").textContent = "Sensors: Error";
+          $("sensorStatus").className = "status-pill bad";
+        }
+      } else {
+        // Android / desktop / older browsers
+        window.addEventListener("deviceorientation", onDeviceOrientation, true);
+        window.addEventListener("devicemotion", onDeviceMotion, true);
+        sensorType = "deviceorientation";
+        log("Using deviceorientation + devicemotion", "ok");
+        $("sensorStatus").textContent = "Sensors: deviceorientation";
+        $("sensorStatus").className = "status-pill warn";
+      }
+    }
+
+    function onDeviceOrientation(e) {
+      // iOS sometimes sends null values until the device moves
+      if (e.beta == null && e.gamma == null) return;
+
+      const beta = e.beta ?? 0;
+      const gamma = e.gamma ?? 0;
+      const roll = eulerToRoll(beta, gamma);
+
+      updateOrientation(roll, {
+        alpha: e.alpha,
+        beta: beta,
+        gamma: gamma,
+        absolute: e.absolute
+      });
+    }
+
+    // Extra source on iOS – rotationRate can help when orientation is laggy
+    let lastMotionRoll = null;
+    function onDeviceMotion(e) {
+      if (!e.rotationRate) return;
+      const rr = e.rotationRate; // degrees per second
+      // Integrate gamma-axis rotation roughly as roll change
+      // (this is a simple fallback; orientation event is preferred)
+      if (rr.gamma != null && lastMotionRoll !== null) {
+        // We mainly rely on deviceorientation; this just keeps the timestamp alive
+      }
+      // Force a status update so we know motion events are arriving
+      if (!lastSensorTime || performance.now() - lastSensorTime > 500) {
+        $("sensorStatus").textContent = "Sensors: receiving motion";
+      }
+    }
+
+    let sampleCounter = 0;
+    function updateOrientation(rollDeg, extra = {}) {
+      rawRoll = rollDeg;
+      const smoothFactor = parseInt($("smoothSlider").value, 10) / 100;
+      smoothedRoll = smoothAngle(smoothedRoll, rawRoll, smoothFactor);
+
+      lastSensorTime = performance.now();
+      sampleCounter++;
+
+      // Log IMU sample if recording
+      if (isRecording) {
+        const t = (performance.now() - startTime) / 1000;
+        imuLog.push({
+          t,
+          roll: rawRoll,
+          smoothed: smoothedRoll,
+          ...extra
+        });
+      }
+
+      $("rollStatus").textContent = `Roll: ${smoothedRoll.toFixed(1)}°`;
+
+      // Periodic proof that sensors are alive
+      if (sampleCounter % 30 === 0) {
+        $("sensorStatus").textContent = `Sensors: live (${sampleCounter})`;
+        $("sensorStatus").className = "status-pill good";
+      }
+    }
+
+    // ---------- Camera ----------
+    async function startCamera() {
+      const [w, h] = $("resSelect").value.split("x").map(Number);
+      const fps = parseInt($("fpsSelect").value, 10);
+
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: w },
+          height: { ideal: h },
+          frameRate: { ideal: fps, max: fps }
+        }
+      };
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
+        await video.play();
+
+        videoTrack = stream.getVideoTracks()[0];
+        const settings = videoTrack.getSettings();
+        log(`Camera started: ${settings.width}×${settings.height} @ ${settings.frameRate || "?"} fps`, "ok");
+
+        // Size canvas to video
+        function resize() {
+          const vw = video.videoWidth || w;
+          const vh = video.videoHeight || h;
+          canvas.width = vw;
+          canvas.height = vh;
+        }
+        video.addEventListener("loadedmetadata", resize);
+        resize();
+
+        $("btnStart").disabled = true;
+        $("btnRecord").disabled = false;
+        $("btnStop").disabled = false;
+        $("startModal").classList.remove("open");
+
+        startPreviewLoop();
+      } catch (err) {
+        const msg = err.name === "NotAllowedError"
+          ? "Camera permission denied"
+          : err.message;
+        log("Camera error: " + msg, "error");
+        if (!window.isSecureContext) {
+          log("Root cause: page is not in a secure context (must be HTTPS or localhost).", "error");
+          $("secureWarning").style.display = "block";
+        }
+        alert("Could not access camera:\n" + msg +
+          (window.isSecureContext ? "" : "\n\nOpen this page via http://localhost or HTTPS."));
+      }
+    }
+
+    // ---------- Real-time preview (horizon lock) ----------
+    function startPreviewLoop() {
+      lastFpsTime = performance.now();
+      frameCount = 0;
+
+      function draw(now) {
+        animationId = requestAnimationFrame(draw);
+
+        if (video.readyState < 2) return;
+
+        const cropPct = parseInt($("cropSlider").value, 10) / 100;
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+
+        // Clear
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Apply inverse rotation to keep horizon level
+        const angle = -smoothedRoll * Math.PI / 180;
+
+        ctx.save();
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate(angle);
+
+        // Scale up slightly so rotated frame still covers after crop
+        const scale = 1 / (1 - cropPct);
+        const drawW = vw * scale;
+        const drawH = vh * scale;
+
+        ctx.drawImage(video, -drawW / 2, -drawH / 2, drawW, drawH);
+        ctx.restore();
+
+        // FPS counter
+        frameCount++;
+        if (now - lastFpsTime >= 1000) {
+          currentFps = frameCount;
+          frameCount = 0;
+          lastFpsTime = now;
+          $("fpsStatus").textContent = `FPS: ${currentFps}`;
+        }
+      }
+      draw(performance.now());
+    }
+
+    // ---------- Recording ----------
+    function startRecording() {
+      if (!stream || isRecording) return;
+
+      recordedChunks = [];
+      rawChunks = [];
+      imuLog = [];
+      startTime = performance.now();
+      isRecording = true;
+
+      // 1. Stabilized stream from canvas
+      const canvasStream = canvas.captureStream(parseInt($("fpsSelect").value, 10));
+      try {
+        mediaRecorder = new MediaRecorder(canvasStream, {
+          mimeType: getSupportedMime(),
+          videoBitsPerSecond: 12_000_000
+        });
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+        };
+        mediaRecorder.onstop = () => {
+          log("Stabilized recording finished", "ok");
+          $("btnDownload").disabled = false;
+        };
+        mediaRecorder.start(200); // timeslice
+      } catch (e) {
+        log("Stabilized MediaRecorder error: " + e.message, "error");
+      }
+
+      // 2. Raw camera stream (best quality source)
+      try {
+        rawRecorder = new MediaRecorder(stream, {
+          mimeType: getSupportedMime(),
+          videoBitsPerSecond: 16_000_000
+        });
+        rawRecorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) rawChunks.push(e.data);
+        };
+        rawRecorder.onstop = () => {
+          log("Raw recording finished", "ok");
+          $("btnDownloadRaw").disabled = false;
+        };
+        rawRecorder.start(200);
+      } catch (e) {
+        log("Raw MediaRecorder error: " + e.message, "error");
+      }
+
+      $("btnRecord").classList.add("recording");
+      $("recStatus").textContent = "● REC";
+      $("recStatus").className = "status-pill bad";
+      log("Recording started (stabilized + raw + IMU)", "ok");
+    }
+
+    function stopRecording() {
+      if (!isRecording) return;
+      isRecording = false;
+
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+      }
+      if (rawRecorder && rawRecorder.state !== "inactive") {
+        rawRecorder.stop();
+      }
+
+      $("btnRecord").classList.remove("recording");
+      $("recStatus").textContent = "Stopped";
+      $("recStatus").className = "status-pill good";
+      log(`IMU samples captured: ${imuLog.length}`, "ok");
+    }
+
+    function getSupportedMime() {
+      const types = [
+        "video/webm;codecs=vp9,opus",
+        "video/webm;codecs=vp8,opus",
+        "video/webm;codecs=vp9",
+        "video/webm;codecs=vp8",
+        "video/webm",
+        "video/mp4"
+      ];
+      for (const t of types) {
+        if (MediaRecorder.isTypeSupported(t)) return t;
+      }
+      return "";
+    }
+
+    // ---------- Download helpers ----------
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    }
+
+    function downloadStabilized() {
+      if (!recordedChunks.length) return;
+      const blob = new Blob(recordedChunks, { type: recordedChunks[0].type || "video/webm" });
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      downloadBlob(blob, `horizon-lock-stabilized-${ts}.webm`);
+      log("Downloaded stabilized video", "ok");
+    }
+
+    function downloadRawAndIMU() {
+      if (!rawChunks.length) {
+        log("No raw video available", "error");
+        return;
+      }
+      const videoBlob = new Blob(rawChunks, { type: rawChunks[0].type || "video/webm" });
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      downloadBlob(videoBlob, `horizon-lock-raw-${ts}.webm`);
+
+      // IMU log as JSON
+      const imuBlob = new Blob([JSON.stringify({
+        version: 1,
+        sensor: sensorType,
+        sampleCount: imuLog.length,
+        durationSec: imuLog.length ? imuLog[imuLog.length - 1].t : 0,
+        samples: imuLog
+      }, null, 2)], { type: "application/json" });
+      downloadBlob(imuBlob, `horizon-lock-imu-${ts}.json`);
+
+      log("Downloaded raw video + IMU log", "ok");
+    }
+
+    // ---------- UI wiring ----------
+    $("cropSlider").addEventListener("input", (e) => {
+      $("cropValue").textContent = e.target.value + "%";
+    });
+    $("smoothSlider").addEventListener("input", (e) => {
+      $("smoothValue").textContent = e.target.value + "%";
+    });
+
+    $("btnGrant").addEventListener("click", async () => {
+      log("Requesting permissions…");
+      try {
+        // Sensors first – permission prompt must stay tied to this click
+        await initSensors();
+        await startCamera();
+      } catch (err) {
+        log("Start failed: " + err.message, "error");
+      }
+    });
+
+    $("btnStart").addEventListener("click", async () => {
+      log("Requesting permissions…");
+      try {
+        await initSensors();
+        await startCamera();
+      } catch (err) {
+        log("Start failed: " + err.message, "error");
+      }
+    });
+
+    $("btnRecord").addEventListener("click", () => {
+      if (isRecording) {
+        stopRecording();
+      } else {
+        startRecording();
+      }
+    });
+
+    $("btnStop").addEventListener("click", () => {
+      stopRecording();
+      if (stream) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      if (animationId) cancelAnimationFrame(animationId);
+      $("btnStart").disabled = false;
+      $("btnRecord").disabled = true;
+      $("btnStop").disabled = true;
+      log("Camera stopped");
+    });
+
+    $("btnDownload").addEventListener("click", downloadStabilized);
+    $("btnDownloadRaw").addEventListener("click", downloadRawAndIMU);
+
+    // Prevent accidental page scroll / zoom on mobile
+    document.addEventListener("touchmove", (e) => {
+      if (e.target.closest(".controls") || e.target.closest(".modal")) return;
+      e.preventDefault();
+    }, { passive: false });
+
+    // Initial checks
+    const isSecure = window.isSecureContext;
+    if (!isSecure) {
+      $("secureWarning").style.display = "block";
+      log("⚠ Running on insecure origin (file:// or non-HTTPS). Camera and sensors will be blocked.", "error");
+      log("Serve this file via a local server or HTTPS host to use the app.", "error");
+    } else {
+      log("Horizon Lock ready – Best Quality mode (raw + IMU + live preview)", "ok");
+      log("Secure context detected. You can grant camera + sensor access.");
+    }
+  </script>
 </body>
 </html>
