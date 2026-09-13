@@ -257,6 +257,49 @@
       color: #94a3b8;
       margin-top: 8px;
     }
+    .playback-panel {
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      background: #0f172a;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      margin-top: 4px;
+    }
+    .playback-panel.open {
+      display: flex;
+    }
+    .playback-panel h3 {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .playback-panel video {
+      width: 100%;
+      max-height: 220px;
+      background: #000;
+      border-radius: 8px;
+      object-fit: contain;
+    }
+    .playback-meta {
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+    .playback-tabs {
+      display: flex;
+      gap: 8px;
+    }
+    .playback-tabs button {
+      flex: 1;
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      border-radius: 8px;
+    }
+    .playback-tabs button.active {
+      background: var(--accent);
+      color: white;
+    }
   </style>
 </head>
 <body>
@@ -313,7 +356,11 @@
           Invert rotation (keeps horizon correct)
         </label>
         <label style="grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 10px;">
-          <input type="checkbox" id="mirrorCheck" checked style="width:18px;height:18px;accent-color:var(--accent);" />
+          <input type="checkbox" id="flipVCheck" checked style="width:18px;height:18px;accent-color:var(--accent);" />
+          Fix vertical flip
+        </label>
+        <label style="grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 10px;">
+          <input type="checkbox" id="flipHCheck" style="width:18px;height:18px;accent-color:var(--accent);" />
           Fix horizontal mirror
         </label>
         <label style="grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 10px;">
@@ -331,6 +378,19 @@
       <div class="row">
         <button class="btn-primary" id="btnDownload" type="button" disabled>Download Stabilized</button>
         <button class="btn-ghost" id="btnDownloadRaw" type="button" disabled>Download Raw + IMU</button>
+      </div>
+
+      <div class="playback-panel" id="playbackPanel">
+        <h3>Recording preview</h3>
+        <div class="playback-tabs">
+          <button type="button" class="btn-ghost active" id="tabStabilized">Stabilized</button>
+          <button type="button" class="btn-ghost" id="tabRaw">Raw</button>
+        </div>
+        <video id="playbackVideo" controls playsinline></video>
+        <div class="playback-meta" id="playbackMeta">No recording yet</div>
+        <div class="row">
+          <button class="btn-ghost" type="button" id="btnClosePreview">Close preview</button>
+        </div>
       </div>
     </div>
   </div>
@@ -788,9 +848,11 @@
         ctx.translate(outW / 2, outH / 2);
         ctx.rotate(angle);
 
-        // Horizontal mirror fix (common on some mobile camera streams)
-        if ($("mirrorCheck").checked) {
-          ctx.scale(-1, 1);
+        // Flip fixes (camera streams are often inverted on mobile browsers)
+        const sx = $("flipHCheck").checked ? -1 : 1;
+        const sy = $("flipVCheck").checked ? -1 : 1;
+        if (sx !== 1 || sy !== 1) {
+          ctx.scale(sx, sy);
         }
 
         ctx.drawImage(video, -drawW / 2, -drawH / 2, drawW, drawH);
@@ -809,6 +871,9 @@
     }
 
     // ---------- Recording ----------
+    let recTimer = null;
+    let recSeconds = 0;
+
     function startRecording() {
       if (!stream || isRecording) return;
 
@@ -817,46 +882,80 @@
       imuLog = [];
       startTime = performance.now();
       isRecording = true;
+      recSeconds = 0;
+
+      const fps = parseInt($("fpsSelect").value, 10);
+      const mime = getSupportedMime();
+      log("Recorder mime: " + (mime || "(browser default)"), "ok");
 
       // 1. Stabilized stream from canvas
-      const canvasStream = canvas.captureStream(parseInt($("fpsSelect").value, 10));
+      // captureStream(0) + manual requestFrame is more reliable on some mobile browsers;
+      // fallback to fixed fps.
+      let canvasStream;
       try {
-        mediaRecorder = new MediaRecorder(canvasStream, {
-          mimeType: getSupportedMime(),
-          videoBitsPerSecond: 12_000_000
-        });
+        canvasStream = canvas.captureStream(fps);
+      } catch (e) {
+        canvasStream = canvas.captureStream();
+      }
+
+      try {
+        const opts = mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000 } : { videoBitsPerSecond: 8_000_000 };
+        mediaRecorder = new MediaRecorder(canvasStream, opts);
         mediaRecorder.ondataavailable = (e) => {
-          if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+          if (e.data && e.data.size > 0) {
+            recordedChunks.push(e.data);
+            log(`Stabilized chunk ${recordedChunks.length}: ${(e.data.size / 1024).toFixed(0)} KB`);
+          }
         };
+        mediaRecorder.onerror = (e) => log("Stabilized recorder error: " + (e.error?.message || e), "error");
         mediaRecorder.onstop = () => {
-          log("Stabilized recording finished", "ok");
-          $("btnDownload").disabled = false;
+          const total = recordedChunks.reduce((s, c) => s + c.size, 0);
+          log(`Stabilized recording finished · ${recordedChunks.length} chunks · ${(total / 1024).toFixed(0)} KB`, "ok");
+          $("btnDownload").disabled = recordedChunks.length === 0;
+          // Show preview once both recorders have had a chance to finish
+          setTimeout(showPlaybackPreview, 300);
         };
-        mediaRecorder.start(200); // timeslice
+        // No timeslice on iOS – it often truncates. Use periodic requestData instead.
+        mediaRecorder.start();
       } catch (e) {
         log("Stabilized MediaRecorder error: " + e.message, "error");
       }
 
-      // 2. Raw camera stream (best quality source)
+      // 2. Raw camera stream
       try {
-        rawRecorder = new MediaRecorder(stream, {
-          mimeType: getSupportedMime(),
-          videoBitsPerSecond: 16_000_000
-        });
+        const opts = mime ? { mimeType: mime, videoBitsPerSecond: 12_000_000 } : { videoBitsPerSecond: 12_000_000 };
+        rawRecorder = new MediaRecorder(stream, opts);
         rawRecorder.ondataavailable = (e) => {
-          if (e.data && e.data.size > 0) rawChunks.push(e.data);
+          if (e.data && e.data.size > 0) {
+            rawChunks.push(e.data);
+          }
         };
+        rawRecorder.onerror = (e) => log("Raw recorder error: " + (e.error?.message || e), "error");
         rawRecorder.onstop = () => {
-          log("Raw recording finished", "ok");
-          $("btnDownloadRaw").disabled = false;
+          const total = rawChunks.reduce((s, c) => s + c.size, 0);
+          log(`Raw recording finished · ${rawChunks.length} chunks · ${(total / 1024).toFixed(0)} KB`, "ok");
+          $("btnDownloadRaw").disabled = rawChunks.length === 0;
+          setTimeout(showPlaybackPreview, 300);
         };
-        rawRecorder.start(200);
+        rawRecorder.start();
       } catch (e) {
         log("Raw MediaRecorder error: " + e.message, "error");
       }
 
+      // Periodic flush so we don't lose data if the tab is backgrounded
+      if (recTimer) clearInterval(recTimer);
+      recTimer = setInterval(() => {
+        if (!isRecording) return;
+        recSeconds++;
+        $("recStatus").textContent = `● REC ${recSeconds}s`;
+        try {
+          if (mediaRecorder && mediaRecorder.state === "recording") mediaRecorder.requestData();
+          if (rawRecorder && rawRecorder.state === "recording") rawRecorder.requestData();
+        } catch (_) {}
+      }, 1000);
+
       $("btnRecord").classList.add("recording");
-      $("recStatus").textContent = "● REC";
+      $("recStatus").textContent = "● REC 0s";
       $("recStatus").className = "status-pill bad";
       log("Recording started (stabilized + raw + IMU)", "ok");
     }
@@ -865,12 +964,26 @@
       if (!isRecording) return;
       isRecording = false;
 
-      if (mediaRecorder && mediaRecorder.state !== "inactive") {
-        mediaRecorder.stop();
+      if (recTimer) {
+        clearInterval(recTimer);
+        recTimer = null;
       }
-      if (rawRecorder && rawRecorder.state !== "inactive") {
-        rawRecorder.stop();
-      }
+
+      // Final flush before stop
+      try {
+        if (mediaRecorder && mediaRecorder.state === "recording") mediaRecorder.requestData();
+        if (rawRecorder && rawRecorder.state === "recording") rawRecorder.requestData();
+      } catch (_) {}
+
+      // Small delay so the last requestData can deliver
+      setTimeout(() => {
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+          try { mediaRecorder.stop(); } catch (_) {}
+        }
+        if (rawRecorder && rawRecorder.state !== "inactive") {
+          try { rawRecorder.stop(); } catch (_) {}
+        }
+      }, 150);
 
       $("btnRecord").classList.remove("recording");
       $("recStatus").textContent = "Stopped";
@@ -879,16 +992,16 @@
     }
 
     function getSupportedMime() {
+      // iOS Safari prefers mp4; Chrome prefers webm
       const types = [
-        "video/webm;codecs=vp9,opus",
-        "video/webm;codecs=vp8,opus",
+        "video/mp4",
         "video/webm;codecs=vp9",
         "video/webm;codecs=vp8",
         "video/webm",
-        "video/mp4"
+        "video/mp4;codecs=avc1"
       ];
       for (const t of types) {
-        if (MediaRecorder.isTypeSupported(t)) return t;
+        if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(t)) return t;
       }
       return "";
     }
@@ -903,11 +1016,93 @@
       setTimeout(() => URL.revokeObjectURL(url), 10_000);
     }
 
+    // ---------- Playback preview ----------
+    let stabilizedBlobUrl = null;
+    let rawBlobUrl = null;
+    let currentPreview = "stabilized";
+
+    function revokePreviewUrls() {
+      if (stabilizedBlobUrl) { URL.revokeObjectURL(stabilizedBlobUrl); stabilizedBlobUrl = null; }
+      if (rawBlobUrl) { URL.revokeObjectURL(rawBlobUrl); rawBlobUrl = null; }
+    }
+
+    function showPlaybackPreview() {
+      revokePreviewUrls();
+      const pv = $("playbackVideo");
+      const meta = $("playbackMeta");
+      const panel = $("playbackPanel");
+
+      if (recordedChunks.length) {
+        const type = recordedChunks[0].type || "video/webm";
+        const blob = new Blob(recordedChunks, { type });
+        stabilizedBlobUrl = URL.createObjectURL(blob);
+      }
+      if (rawChunks.length) {
+        const type = rawChunks[0].type || "video/webm";
+        const blob = new Blob(rawChunks, { type });
+        rawBlobUrl = URL.createObjectURL(blob);
+      }
+
+      if (!stabilizedBlobUrl && !rawBlobUrl) {
+        panel.classList.remove("open");
+        return;
+      }
+
+      currentPreview = stabilizedBlobUrl ? "stabilized" : "raw";
+      $("tabStabilized").classList.toggle("active", currentPreview === "stabilized");
+      $("tabRaw").classList.toggle("active", currentPreview === "raw");
+      $("tabStabilized").disabled = !stabilizedBlobUrl;
+      $("tabRaw").disabled = !rawBlobUrl;
+
+      const url = currentPreview === "stabilized" ? stabilizedBlobUrl : rawBlobUrl;
+      pv.src = url;
+      pv.load();
+      pv.onloadedmetadata = () => {
+        const dur = isFinite(pv.duration) ? pv.duration.toFixed(1) + "s" : "unknown";
+        const size = (currentPreview === "stabilized" ? recordedChunks : rawChunks)
+          .reduce((s, c) => s + c.size, 0);
+        meta.textContent = `${currentPreview} · ${dur} · ${(size / 1024).toFixed(0)} KB · ${pv.videoWidth}×${pv.videoHeight}`;
+        log(`Preview ready: ${currentPreview} duration=${dur}`, "ok");
+      };
+      panel.classList.add("open");
+      // Auto-play muted so user sees it immediately
+      pv.muted = true;
+      pv.play().catch(() => {});
+    }
+
+    function switchPreview(which) {
+      if (which === "stabilized" && !stabilizedBlobUrl) return;
+      if (which === "raw" && !rawBlobUrl) return;
+      currentPreview = which;
+      $("tabStabilized").classList.toggle("active", which === "stabilized");
+      $("tabRaw").classList.toggle("active", which === "raw");
+      const pv = $("playbackVideo");
+      const url = which === "stabilized" ? stabilizedBlobUrl : rawBlobUrl;
+      const chunks = which === "stabilized" ? recordedChunks : rawChunks;
+      pv.src = url;
+      pv.load();
+      pv.onloadedmetadata = () => {
+        const dur = isFinite(pv.duration) ? pv.duration.toFixed(1) + "s" : "unknown";
+        const size = chunks.reduce((s, c) => s + c.size, 0);
+        $("playbackMeta").textContent =
+          `${which} · ${dur} · ${(size / 1024).toFixed(0)} KB · ${pv.videoWidth}×${pv.videoHeight}`;
+      };
+      pv.muted = true;
+      pv.play().catch(() => {});
+    }
+
+    function extForType(type) {
+      if (!type) return "webm";
+      if (type.includes("mp4")) return "mp4";
+      return "webm";
+    }
+
     function downloadStabilized() {
       if (!recordedChunks.length) return;
-      const blob = new Blob(recordedChunks, { type: recordedChunks[0].type || "video/webm" });
+      const type = recordedChunks[0].type || "video/webm";
+      const blob = new Blob(recordedChunks, { type });
       const ts = new Date().toISOString().replace(/[:.]/g, "-");
-      downloadBlob(blob, `horizon-lock-stabilized-${ts}.webm`);
+      downloadBlob(blob, `horizon-lock-stabilized-${ts}.${extForType(type)}`);
       log("Downloaded stabilized video", "ok");
     }
 
@@ -916,9 +1111,10 @@
         log("No raw video available", "error");
         return;
       }
-      const videoBlob = new Blob(rawChunks, { type: rawChunks[0].type || "video/webm" });
+      const type = rawChunks[0].type || "video/webm";
+      const videoBlob = new Blob(rawChunks, { type });
       const ts = new Date().toISOString().replace(/[:.]/g, "-");
-      downloadBlob(videoBlob, `horizon-lock-raw-${ts}.webm`);
+      downloadBlob(videoBlob, `horizon-lock-raw-${ts}.${extForType(type)}`);
 
       // IMU log as JSON
       const imuBlob = new Blob([JSON.stringify({
@@ -985,6 +1181,16 @@
 
     $("btnDownload").addEventListener("click", downloadStabilized);
     $("btnDownloadRaw").addEventListener("click", downloadRawAndIMU);
+
+    $("tabStabilized").addEventListener("click", () => switchPreview("stabilized"));
+    $("tabRaw").addEventListener("click", () => switchPreview("raw"));
+    $("btnClosePreview").addEventListener("click", () => {
+      $("playbackPanel").classList.remove("open");
+      const pv = $("playbackVideo");
+      pv.pause();
+      pv.removeAttribute("src");
+      pv.load();
+    });
 
     // Prevent accidental page scroll / zoom on mobile
     document.addEventListener("touchmove", (e) => {
