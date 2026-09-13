@@ -283,9 +283,9 @@
     <div class="controls">
       <div class="settings">
         <label>
-          Crop margin
-          <input type="range" id="cropSlider" min="5" max="35" value="18" />
-          <span id="cropValue">18%</span>
+          Extra crop (safety)
+          <input type="range" id="cropSlider" min="0" max="30" value="8" />
+          <span id="cropValue">8%</span>
         </label>
         <label>
           Smoothing
@@ -300,19 +300,25 @@
           </select>
         </label>
         <label>
-          Resolution
+          Resolution (4:3)
           <select id="resSelect">
-            <option value="1280x720">720p</option>
-            <option value="1920x1080" selected>1080p</option>
+            <option value="1440x1080">1440×1080</option>
+            <option value="1280x960" selected>1280×960</option>
+            <option value="1024x768">1024×768</option>
+            <option value="640x480">640×480</option>
           </select>
         </label>
         <label style="grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 10px;">
-          <input type="checkbox" id="invertCheck" style="width:18px;height:18px;accent-color:var(--accent);" />
-          Invert rotation (fix this if horizon tilts the wrong way / doubles)
+          <input type="checkbox" id="invertCheck" checked style="width:18px;height:18px;accent-color:var(--accent);" />
+          Invert rotation (keeps horizon correct)
+        </label>
+        <label style="grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 10px;">
+          <input type="checkbox" id="mirrorCheck" checked style="width:18px;height:18px;accent-color:var(--accent);" />
+          Fix horizontal mirror
         </label>
         <label style="grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 10px;">
           <input type="checkbox" id="lockCheck" checked style="width:18px;height:18px;accent-color:var(--accent);" />
-          Try lock screen orientation (reduces double-rotation)
+          Try lock screen orientation
         </label>
       </div>
 
@@ -662,12 +668,14 @@
       const [w, h] = $("resSelect").value.split("x").map(Number);
       const fps = parseInt($("fpsSelect").value, 10);
 
+      // Prefer true 4:3 sensor crop when the device supports it
       const constraints = {
         audio: false,
         video: {
           facingMode: { ideal: "environment" },
           width: { ideal: w },
           height: { ideal: h },
+          aspectRatio: { ideal: 4 / 3 },
           frameRate: { ideal: fps, max: fps }
         }
       };
@@ -681,12 +689,33 @@
         const settings = videoTrack.getSettings();
         log(`Camera started: ${settings.width}×${settings.height} @ ${settings.frameRate || "?"} fps`, "ok");
 
-        // Size canvas to video
+        // Size canvas to a 4:3 output (letterbox/crop source if needed)
         function resize() {
           const vw = video.videoWidth || w;
           const vh = video.videoHeight || h;
-          canvas.width = vw;
-          canvas.height = vh;
+          // Prefer requested 4:3 resolution; fall back to largest 4:3 that fits the stream
+          let outW = w;
+          let outH = h;
+          if (vw && vh) {
+            // Keep 4:3 and don't exceed source
+            const srcAspect = vw / vh;
+            if (Math.abs(srcAspect - 4 / 3) > 0.05) {
+              // Source isn't 4:3 – pick max 4:3 box inside source
+              if (srcAspect > 4 / 3) {
+                outH = vh;
+                outW = Math.round(vh * 4 / 3);
+              } else {
+                outW = vw;
+                outH = Math.round(vw * 3 / 4);
+              }
+            } else {
+              outW = vw;
+              outH = vh;
+            }
+          }
+          canvas.width = outW;
+          canvas.height = outH;
+          log(`Output canvas: ${outW}×${outH} (4:3)`, "ok");
         }
         video.addEventListener("loadedmetadata", resize);
         resize();
@@ -726,38 +755,54 @@
 
         if (video.readyState < 2) return;
 
-        const cropPct = parseInt($("cropSlider").value, 10) / 100;
         const vw = video.videoWidth;
         const vh = video.videoHeight;
+        const outW = canvas.width;
+        const outH = canvas.height;
 
         // Clear
         ctx.fillStyle = "#000";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillRect(0, 0, outW, outH);
 
-        // Apply inverse rotation to keep horizon level.
-        // invertCheck flips the sign if the correction is going the wrong way.
+        // Rotation that keeps the horizon level
         const invert = $("invertCheck").checked ? -1 : 1;
-        const angle = -smoothedRoll * invert * Math.PI / 180;
+        const angleDeg = -smoothedRoll * invert;
+        const angle = angleDeg * Math.PI / 180;
+        const cos = Math.abs(Math.cos(angle));
+        const sin = Math.abs(Math.sin(angle));
 
-        ctx.save();
-        ctx.translate(canvas.width / 2, canvas.height / 2);
-        ctx.rotate(angle);
+        // Dynamic zoom: minimum scale so a rotated vw×vh rectangle still
+        // fully covers the outW×outH viewport (no black bars).
+        // Extra user crop margin is applied on top for safety during fast spins.
+        const cropPct = parseInt($("cropSlider").value, 10) / 100;
+        const coverScale = Math.max(
+          (outW * cos + outH * sin) / vw,
+          (outW * sin + outH * cos) / vh
+        );
+        const scale = coverScale / (1 - cropPct);
 
-        // Scale up slightly so rotated frame still covers after crop
-        const scale = 1 / (1 - cropPct);
         const drawW = vw * scale;
         const drawH = vh * scale;
+
+        ctx.save();
+        ctx.translate(outW / 2, outH / 2);
+        ctx.rotate(angle);
+
+        // Horizontal mirror fix (common on some mobile camera streams)
+        if ($("mirrorCheck").checked) {
+          ctx.scale(-1, 1);
+        }
 
         ctx.drawImage(video, -drawW / 2, -drawH / 2, drawW, drawH);
         ctx.restore();
 
-        // FPS counter
+        // FPS + zoom readout
         frameCount++;
         if (now - lastFpsTime >= 1000) {
           currentFps = frameCount;
           frameCount = 0;
           lastFpsTime = now;
-          $("fpsStatus").textContent = `FPS: ${currentFps}`;
+          $("fpsStatus").textContent = `FPS: ${currentFps} · zoom ${(scale).toFixed(2)}×`;
         }
       }
       draw(performance.now());
