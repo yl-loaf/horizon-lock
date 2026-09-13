@@ -289,8 +289,8 @@
         </label>
         <label>
           Smoothing
-          <input type="range" id="smoothSlider" min="0" max="95" value="55" />
-          <span id="smoothValue">55%</span>
+          <input type="range" id="smoothSlider" min="0" max="95" value="40" />
+          <span id="smoothValue">40%</span>
         </label>
         <label>
           Target FPS
@@ -305,6 +305,14 @@
             <option value="1280x720">720p</option>
             <option value="1920x1080" selected>1080p</option>
           </select>
+        </label>
+        <label style="grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 10px;">
+          <input type="checkbox" id="invertCheck" style="width:18px;height:18px;accent-color:var(--accent);" />
+          Invert rotation (fix this if horizon tilts the wrong way / doubles)
+        </label>
+        <label style="grid-column: 1 / -1; flex-direction: row; align-items: center; gap: 10px;">
+          <input type="checkbox" id="lockCheck" checked style="width:18px;height:18px;accent-color:var(--accent);" />
+          Try lock screen orientation (reduces double-rotation)
         </label>
       </div>
 
@@ -397,17 +405,50 @@
     const video = $("rawVideo");
 
     // ---------- Sensor helpers ----------
+    /**
+     * Compute the angle of gravity projected onto the device screen.
+     * This is the true "horizon tilt" in the camera image plane.
+     * Based on the projection used by Chromium / Android orientation logic.
+     *
+     * Returns degrees. Positive = device tilted clockwise (from the user's view
+     * of the screen in its natural portrait orientation).
+     */
     function eulerToRoll(beta, gamma) {
-      // beta  = front-back tilt (-180 to 180)
-      // gamma = left-right tilt (-90 to 90)
-      // For horizon lock we want the rotation that keeps the horizon level
-      // in the camera image. Using gamma directly works well when the phone
-      // is roughly upright; we blend with beta for extreme angles.
-      if (Math.abs(beta) > 45) {
-        // Device is significantly tilted forward/back – use a more stable mix
-        return gamma * Math.cos(beta * Math.PI / 180);
+      // Convert to radians
+      const b = (beta || 0) * Math.PI / 180;
+      const g = (gamma || 0) * Math.PI / 180;
+
+      // Projection of the "up" (anti-gravity) vector onto the screen plane
+      // in the device's natural orientation coordinates.
+      // x: rightward on screen, y: upward on screen
+      const x = -Math.sin(g) * Math.cos(b);
+      const y = -Math.sin(b);
+
+      // Angle of the up-vector from the screen's vertical axis
+      // atan2(x, y) gives clockwise angle from "up" when x is right, y is up
+      let angleDeg = Math.atan2(x, y) * 180 / Math.PI;
+
+      // Also account for current screen orientation (portrait / landscape)
+      // so the correction stays correct when the browser has rotated the UI
+      const screenAngle = getScreenOrientationAngle();
+      angleDeg -= screenAngle;
+
+      // Normalize to [-180, 180]
+      while (angleDeg > 180) angleDeg -= 360;
+      while (angleDeg < -180) angleDeg += 360;
+      return angleDeg;
+    }
+
+    function getScreenOrientationAngle() {
+      // Returns degrees the screen has been rotated from natural portrait
+      if (screen.orientation && typeof screen.orientation.angle === "number") {
+        return screen.orientation.angle;
       }
-      return gamma;
+      // Legacy
+      if (typeof window.orientation === "number") {
+        return window.orientation;
+      }
+      return 0;
     }
 
     function quaternionToRoll(qx, qy, qz, qw) {
@@ -548,6 +589,27 @@
         gamma: gamma,
         absolute: e.absolute
       });
+
+      // Debug: show raw angles so we can see if sensors are alive
+      $("rollStatus").textContent =
+        `Roll: ${smoothedRoll.toFixed(0)}°  (β${beta.toFixed(0)} γ${gamma.toFixed(0)})`;
+    }
+
+    async function tryLockOrientation() {
+      try {
+        // Fullscreen often required before orientation lock works
+        if (!document.fullscreenElement && canvas.requestFullscreen) {
+          await canvas.requestFullscreen().catch(() => {});
+        }
+        if (screen.orientation && screen.orientation.lock) {
+          // Lock to current type so the UI stops auto-rotating
+          const type = screen.orientation.type || "portrait-primary";
+          await screen.orientation.lock(type);
+          log("Screen orientation locked to " + type, "ok");
+        }
+      } catch (e) {
+        log("Orientation lock not available: " + (e.message || e), "error");
+      }
     }
 
     // Extra source on iOS – rotationRate can help when orientation is laggy
@@ -586,7 +648,7 @@
         });
       }
 
-      $("rollStatus").textContent = `Roll: ${smoothedRoll.toFixed(1)}°`;
+      // rollStatus is updated in onDeviceOrientation with beta/gamma debug info
 
       // Periodic proof that sensors are alive
       if (sampleCounter % 30 === 0) {
@@ -634,6 +696,11 @@
         $("btnStop").disabled = false;
         $("startModal").classList.remove("open");
 
+        // Try to lock screen orientation so the browser doesn't also rotate the UI
+        if ($("lockCheck").checked) {
+          tryLockOrientation();
+        }
+
         startPreviewLoop();
       } catch (err) {
         const msg = err.name === "NotAllowedError"
@@ -667,8 +734,10 @@
         ctx.fillStyle = "#000";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // Apply inverse rotation to keep horizon level
-        const angle = -smoothedRoll * Math.PI / 180;
+        // Apply inverse rotation to keep horizon level.
+        // invertCheck flips the sign if the correction is going the wrong way.
+        const invert = $("invertCheck").checked ? -1 : 1;
+        const angle = -smoothedRoll * invert * Math.PI / 180;
 
         ctx.save();
         ctx.translate(canvas.width / 2, canvas.height / 2);
